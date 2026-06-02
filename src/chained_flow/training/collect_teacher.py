@@ -50,7 +50,15 @@ def format_gsm8k_prompt(example: dict[str, Any], tokenizer: Any) -> str:
     question = example["question"].strip()
     messages = [{"role": "user", "content": question}]
     if getattr(tokenizer, "chat_template", None):
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        try:
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     return f"Question:\n{question}\n\nAnswer:\n"
 
 
@@ -85,6 +93,7 @@ def _batched(items: Iterable[tuple[int, dict[str, Any]]], batch_size: int) -> It
 
 
 def _ensure_padding(tokenizer: Any, eos_token_id: int | None) -> int:
+    tokenizer.padding_side = "left"
     pad_token_id = getattr(tokenizer, "pad_token_id", None)
     if pad_token_id is not None:
         return int(pad_token_id)
@@ -95,12 +104,28 @@ def _ensure_padding(tokenizer: Any, eos_token_id: int | None) -> int:
     return int(eos_token_id)
 
 
+def _eos_token_ids(tokenizer: Any, eos_token_id: int | list[int] | None) -> list[int]:
+    ids: list[int] = []
+    if isinstance(eos_token_id, int):
+        ids.append(eos_token_id)
+    elif isinstance(eos_token_id, list):
+        ids.extend(int(item) for item in eos_token_id)
+
+    for token in ("<|im_end|>", "<|endoftext|>"):
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        if isinstance(token_id, int) and token_id >= 0:
+            ids.append(token_id)
+
+    return sorted(set(ids))
+
+
 def _sequence_spans(
     input_ids: torch.Tensor,
     pad_token_id: int,
-    eos_token_id: int | None,
+    eos_token_id: int | list[int] | None,
     prompt_lengths: TypingSequence[int],
 ) -> list[tuple[int, int]]:
+    eos_ids = set(eos_token_id if isinstance(eos_token_id, list) else ([] if eos_token_id is None else [eos_token_id]))
     spans: list[tuple[int, int]] = []
     for row, prompt_length in zip(input_ids, prompt_lengths, strict=True):
         nonpad = (row != pad_token_id).nonzero(as_tuple=False)
@@ -110,8 +135,11 @@ def _sequence_spans(
         start = int(nonpad[0].item())
         end = int(nonpad[-1].item() + 1)
         prompt_end = min(start + int(prompt_length), end)
-        if eos_token_id is not None:
-            eos_positions = (row[prompt_end:end] == eos_token_id).nonzero(as_tuple=False)
+        if eos_ids:
+            eos_positions = torch.tensor(
+                [offset for offset, token_id in enumerate(row[prompt_end:end].tolist()) if token_id in eos_ids],
+                device=row.device,
+            )
             if len(eos_positions):
                 end = prompt_end + int(eos_positions[0].item() + 1)
         spans.append((start, end))
@@ -146,6 +174,7 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     wrapper = context.frozen_lm
     storage_dtype = _storage_torch_dtype(config.storage_dtype)
     pad_token_id = _ensure_padding(wrapper.tokenizer, wrapper.eos_token_id)
+    eos_token_ids = _eos_token_ids(wrapper.tokenizer, wrapper.eos_token_id)
     print(f"model loaded: {config.model_id}", flush=True)
 
     print(
@@ -186,12 +215,12 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
                 max_new_tokens=config.generation_max_new_tokens,
                 do_sample=False,
                 pad_token_id=pad_token_id,
-                eos_token_id=wrapper.eos_token_id,
+                eos_token_id=eos_token_ids,
             )
             input_ids = generated_ids.to(wrapper.device)
             if config.max_tokens is not None:
                 input_ids = input_ids[:, : config.max_tokens]
-            spans = _sequence_spans(input_ids, pad_token_id, wrapper.eos_token_id, prompt_lengths)
+            spans = _sequence_spans(input_ids, pad_token_id, eos_token_ids, prompt_lengths)
             trimmed_sequences = [
                 input_ids[row_idx, start:end]
                 for row_idx, (start, end) in enumerate(spans)
