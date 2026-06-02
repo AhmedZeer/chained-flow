@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 import sys
 
 from dotenv import load_dotenv
+import yaml
 
 load_dotenv()
 
@@ -16,44 +16,57 @@ from chained_flow.frozen_lm import DEFAULT_MODEL_ID
 from chained_flow.training.collect_teacher import TeacherCollectionConfig, collect_teacher_dataset
 
 
-def env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def env_int(name: str) -> int | None:
-    value = os.getenv(name)
-    if value is None or value == "":
-        return None
-    return int(value)
+def load_yaml_args(path: Path) -> argparse.Namespace:
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError("collection YAML config must contain a mapping at the top level")
+    data["output_dir"] = Path(data.get("output_dir", "teacher_states/gsm8k-qwen35-08b-smoke"))
+    return argparse.Namespace(
+        model_id=data.get("model_id", DEFAULT_MODEL_ID),
+        dataset_name=data.get("dataset_name", "gsm8k"),
+        dataset_config=data.get("dataset_config", "main"),
+        split=data.get("split", "train"),
+        source=data.get("source", "gsm8k"),
+        format_name=data.get("format_name", "qwen_chat_qa"),
+        limit=data.get("limit"),
+        max_tokens=data.get("max_tokens"),
+        generation_max_new_tokens=data.get("generation_max_new_tokens", 4096),
+        storage_dtype=data.get("storage_dtype", "float32"),
+        local_files_only=bool(data.get("local_files_only", False)),
+        output_dir=data["output_dir"],
+        push_to_hub=data.get("push_to_hub"),
+        private=bool(data.get("private", False)),
+    )
 
 
 def parse_args() -> argparse.Namespace:
+    if len(sys.argv) == 2 and sys.argv[1].endswith((".yaml", ".yml")):
+        return load_yaml_args(Path(sys.argv[1]))
+
     parser = argparse.ArgumentParser(description="Collect K-independent frozen-LM teacher hidden states.")
-    parser.add_argument("--model-id", default=os.getenv("MODEL_ID", DEFAULT_MODEL_ID))
-    parser.add_argument("--dataset-name", default=os.getenv("DATASET_NAME", "gsm8k"))
-    parser.add_argument("--dataset-config", default=os.getenv("DATASET_CONFIG", "main"))
-    parser.add_argument("--split", default=os.getenv("DATASET_SPLIT", "train"))
-    parser.add_argument("--source", default=os.getenv("SOURCE", "gsm8k"))
-    parser.add_argument("--format-name", default=os.getenv("FORMAT_NAME", "qwen_chat_qa"))
-    parser.add_argument("--limit", type=int, default=env_int("LIMIT"))
-    parser.add_argument("--max-tokens", type=int, default=env_int("MAX_TOKENS"))
-    parser.add_argument("--generation-max-new-tokens", type=int, default=env_int("GENERATION_MAX_NEW_TOKENS") or 4096)
+    parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
+    parser.add_argument("--dataset-name", default="gsm8k")
+    parser.add_argument("--dataset-config", default="main")
+    parser.add_argument("--split", default="train")
+    parser.add_argument("--source", default="gsm8k")
+    parser.add_argument("--format-name", default="qwen_chat_qa")
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--max-tokens", type=int, default=None)
+    parser.add_argument("--generation-max-new-tokens", type=int, default=4096)
     parser.add_argument(
         "--storage-dtype",
         choices=["float32", "float16", "bfloat16"],
-        default=os.getenv("STORAGE_DTYPE", "float32"),
+        default="float32",
     )
-    parser.add_argument("--local-files-only", action="store_true", default=env_bool("LOCAL_FILES_ONLY"))
+    parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(os.getenv("OUTPUT_DIR", "teacher_states/gsm8k-qwen35-08b-smoke")),
+        default=Path("teacher_states/gsm8k-qwen35-08b-smoke"),
     )
-    parser.add_argument("--push-to-hub", default=os.getenv("PUSH_TO_HUB"), help="Optional HF repo id, e.g. user/dataset-name.")
-    parser.add_argument("--private", action="store_true", default=env_bool("PRIVATE"))
+    parser.add_argument("--push-to-hub", default=None, help="Optional HF repo id, e.g. user/dataset-name.")
+    parser.add_argument("--private", action="store_true")
     return parser.parse_args()
 
 

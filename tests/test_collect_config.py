@@ -1,0 +1,21 @@
+from pathlib import Path
+import importlib.util
+
+
+def load_script_module():
+    path = Path("scripts/collect_teacher_states.py").resolve()
+    spec = importlib.util.spec_from_file_location("collect_teacher_states", path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_smoke_gsm8k_collection_yaml_parses():
+    module = load_script_module()
+    args = module.load_yaml_args(Path("collect_configs/smoke_gsm8k.yaml"))
+    assert args.dataset_name == "gsm8k"
+    assert args.limit == 10
+    assert args.local_files_only is True
+    assert args.output_dir == Path("teacher_states/gsm8k-qwen35-08b-smoke")

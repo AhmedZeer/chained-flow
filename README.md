@@ -124,11 +124,12 @@ GSM8K collection example:
 
 ```bash
 cp .env.example .env
-UV_CACHE_DIR=.uv-cache uv run python scripts/collect_teacher_states.py
+UV_CACHE_DIR=.uv-cache uv run python scripts/collect_teacher_states.py collect_configs/smoke_gsm8k.yaml
 ```
 
-The script loads `.env` before project imports. CLI flags remain available and
-override `.env` values.
+The script loads `.env` before project imports so `HF_TOKEN`, `HF_HOME`, and
+similar Hugging Face environment variables are available. Collection settings
+come from CLI args or a YAML config, not `.env`.
 
 ## Tests
 
