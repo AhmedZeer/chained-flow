@@ -6,7 +6,7 @@ source: gsm8k
 format_name: qwen_chat_qa
 limit: 10
 generation_max_new_tokens: 4096
-batch_size: 1
+batch_size: 256
 storage_dtype: float32
 local_files_only: false
 output_dir: teacher_states/gsm8k-qwen35-08b-smoke
