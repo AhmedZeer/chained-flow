@@ -29,5 +29,16 @@ def test_sequence_spans_trim_left_padding_and_stop_at_eos():
         ),
         pad_token_id=0,
         eos_token_id=2,
+        prompt_lengths=[2, 2],
     )
     assert spans == [(2, 5), (1, 4)]
+
+
+def test_sequence_spans_ignore_eos_inside_prompt():
+    spans = _sequence_spans(
+        torch.tensor([[0, 4, 2, 5, 6, 2, 9]]),
+        pad_token_id=0,
+        eos_token_id=2,
+        prompt_lengths=[4],
+    )
+    assert spans == [(1, 6)]

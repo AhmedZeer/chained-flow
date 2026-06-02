@@ -95,19 +95,25 @@ def _ensure_padding(tokenizer: Any, eos_token_id: int | None) -> int:
     return int(eos_token_id)
 
 
-def _sequence_spans(input_ids: torch.Tensor, pad_token_id: int, eos_token_id: int | None) -> list[tuple[int, int]]:
+def _sequence_spans(
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    eos_token_id: int | None,
+    prompt_lengths: TypingSequence[int],
+) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
-    for row in input_ids:
+    for row, prompt_length in zip(input_ids, prompt_lengths, strict=True):
         nonpad = (row != pad_token_id).nonzero(as_tuple=False)
         if not len(nonpad):
             spans.append((0, 0))
             continue
         start = int(nonpad[0].item())
         end = int(nonpad[-1].item() + 1)
+        prompt_end = min(start + int(prompt_length), end)
         if eos_token_id is not None:
-            eos_positions = (row[start:end] == eos_token_id).nonzero(as_tuple=False)
+            eos_positions = (row[prompt_end:end] == eos_token_id).nonzero(as_tuple=False)
             if len(eos_positions):
-                end = start + int(eos_positions[0].item() + 1)
+                end = prompt_end + int(eos_positions[0].item() + 1)
         spans.append((start, end))
     return spans
 
@@ -185,7 +191,7 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
             input_ids = generated_ids.to(wrapper.device)
             if config.max_tokens is not None:
                 input_ids = input_ids[:, : config.max_tokens]
-            spans = _sequence_spans(input_ids, pad_token_id, wrapper.eos_token_id)
+            spans = _sequence_spans(input_ids, pad_token_id, wrapper.eos_token_id, prompt_lengths)
             trimmed_sequences = [
                 input_ids[row_idx, start:end]
                 for row_idx, (start, end) in enumerate(spans)
