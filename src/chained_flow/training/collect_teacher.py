@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 from datasets import Dataset, Features, Sequence, Value, load_dataset
 import torch
+from tqdm.auto import tqdm
 
 from chained_flow.context import ChainedFlowContext
 from chained_flow.frozen_lm import DEFAULT_MODEL_ID
@@ -72,6 +73,7 @@ def _iter_limited(dataset: Iterable[dict[str, Any]], limit: int | None) -> Itera
 @torch.inference_mode()
 def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, TimingStats]:
     timings = TimingStats()
+    print(f"loading model: {config.model_id}", flush=True)
     context = ChainedFlowContext.from_pretrained(
         config.model_id,
         local_files_only=config.local_files_only,
@@ -79,17 +81,29 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     timings.merge(context.timings)
     wrapper = context.frozen_lm
     storage_dtype = _storage_torch_dtype(config.storage_dtype)
+    print(f"model loaded: {config.model_id}", flush=True)
 
+    print(
+        f"loading dataset: {config.dataset_name}/{config.dataset_config} split={config.split}",
+        flush=True,
+    )
     with timed_section(timings, "dataset_load"):
         raw_dataset = load_dataset(
             config.dataset_name,
             config.dataset_config,
             split=config.split,
         )
+    print(f"dataset loaded: rows={len(raw_dataset)}", flush=True)
 
     rows: list[dict[str, Any]] = []
     with timed_section(timings, "teacher_collection", wrapper.device):
-        for index, example in _iter_limited(raw_dataset, config.limit):
+        total = min(config.limit, len(raw_dataset)) if config.limit is not None else len(raw_dataset)
+        examples = tqdm(
+            _iter_limited(raw_dataset, config.limit),
+            total=total,
+            desc="collecting teacher states",
+        )
+        for index, example in examples:
             prompt_text = format_gsm8k_prompt(example, wrapper.tokenizer)
             prompt_ids = wrapper.tokenize(prompt_text)
             generated_ids = wrapper.model.generate(
