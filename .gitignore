@@ -6,8 +6,12 @@ dist/
 wheels/
 *.egg-info
 
+# data
+teacher_states/
+
 # Virtual environments
 .venv/
+.env
 
 # Hugging Face cache/downloads
 hf_home/

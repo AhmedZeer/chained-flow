@@ -68,6 +68,39 @@ L =
 + 0.1  * verifier.expected_accept
 ```
 
+## Teacher-state datasets
+
+Teacher collection stores K-independent full sequences. Each row contains:
+
+- `input_ids`: tokenized formatted prompt+response text.
+- `final_hidden`: frozen LM final hidden states for every token position.
+- `example_id`, `source`, `split`: tracing and dataset-mixing metadata.
+- `text`: the exact decoded prompt plus model-generated response used for
+  collection.
+- `format_name`, `model_id`, `hidden_dtype`, `num_tokens`: reproducibility and
+  filtering metadata.
+
+Training samples windows dynamically:
+
+```text
+context_hidden = final_hidden[t-m+1 : t+1]
+target_hidden  = final_hidden[t : t+K]
+future_tokens  = input_ids[t+1 : t+K+1]
+```
+
+GSM8K collection is prompt-only: the script asks the frozen model to generate
+the response greedily, then stores hidden states for that generated sequence.
+
+GSM8K collection example:
+
+```bash
+cp .env.example .env
+UV_CACHE_DIR=.uv-cache uv run python scripts/collect_teacher_states.py
+```
+
+The script loads `.env` before project imports. CLI flags remain available and
+override `.env` values.
+
 ## Tests
 
 ```bash
