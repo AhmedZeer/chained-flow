@@ -133,6 +133,10 @@ The script loads `.env` before project imports so `HF_TOKEN`, `HF_HOME`, and
 similar Hugging Face environment variables are available. Collection settings
 come from CLI args or a YAML config, not `.env`.
 
+Set `device: cuda` or `device: cuda:0` in collection/training YAML configs to
+load the frozen model on CUDA. Use `device: auto` to let Transformers choose a
+device map.
+
 ## Tests
 
 ```bash

@@ -24,6 +24,7 @@ class HiddenMLPModelArguments:
     draft_length: int = 4
     hidden_multiplier: int = 2
     local_files_only: bool = False
+    device: str | None = None
 
 
 @dataclass
@@ -83,6 +84,7 @@ def train_hidden_mlp_with_trainer(
     torch.manual_seed(training_args.seed)
     context = ChainedFlowContext.from_pretrained(
         model_args.model_id,
+        device=model_args.device,
         local_files_only=model_args.local_files_only,
     )
     frozen_lm = context.frozen_lm

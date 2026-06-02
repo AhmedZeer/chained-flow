@@ -21,4 +21,5 @@ def test_smoke_mlp_yaml_config_parses():
     assert training_args.output_dir == "checkpoints/hidden-mlp-smoke"
     assert model_args.context_size == 4
     assert model_args.draft_length == 4
+    assert model_args.device is None
     assert loss_args.lambda_mse == 1.0

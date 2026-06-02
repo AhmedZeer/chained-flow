@@ -26,6 +26,7 @@ class TeacherCollectionConfig:
     batch_size: int = 1
     storage_dtype: str = "float32"
     local_files_only: bool = False
+    device: str | None = None
 
 
 def teacher_dataset_features() -> Features:
@@ -170,6 +171,7 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     print(f"loading model: {config.model_id}", flush=True)
     context = ChainedFlowContext.from_pretrained(
         config.model_id,
+        device=config.device,
         local_files_only=config.local_files_only,
     )
     timings.merge(context.timings)

@@ -9,6 +9,7 @@ generation_max_new_tokens: 4096
 batch_size: 1
 storage_dtype: float32
 local_files_only: true
+device:
 output_dir: teacher_states/gsm8k-qwen35-08b-smoke
 push_to_hub:
 private: false

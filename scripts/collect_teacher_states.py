@@ -35,6 +35,7 @@ def load_yaml_args(path: Path) -> argparse.Namespace:
         batch_size=data.get("batch_size", 1),
         storage_dtype=data.get("storage_dtype", "float32"),
         local_files_only=bool(data.get("local_files_only", False)),
+        device=data.get("device"),
         output_dir=data["output_dir"],
         push_to_hub=data.get("push_to_hub"),
         private=bool(data.get("private", False)),
@@ -62,6 +63,7 @@ def parse_args() -> argparse.Namespace:
         default="float32",
     )
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--device", default=None, help="Device for model loading, e.g. cuda, cuda:0, cpu, mps, or auto.")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -87,6 +89,7 @@ def main() -> None:
         batch_size=args.batch_size,
         storage_dtype=args.storage_dtype,
         local_files_only=args.local_files_only,
+        device=args.device,
     )
     dataset, timings = collect_teacher_dataset(config)
     args.output_dir.mkdir(parents=True, exist_ok=True)

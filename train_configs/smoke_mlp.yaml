@@ -2,6 +2,7 @@ dataset_path: teacher_states/gsm8k-qwen35-08b-smoke
 output_dir: checkpoints/hidden-mlp-smoke
 model_id: Qwen/Qwen3.5-0.8B
 local_files_only: true
+device:
 
 context_size: 4
 draft_length: 4
