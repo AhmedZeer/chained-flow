@@ -6,6 +6,8 @@ from chained_flow.training.collect_teacher import _sequence_spans, format_gsm8k_
 def test_teacher_features_text_first_and_no_attention_mask():
     features = teacher_dataset_features()
     assert list(features.keys())[0] == "text"
+    assert list(features.keys())[1] == "prompt_text"
+    assert list(features.keys())[2] == "generated_text"
     assert "attention_mask" not in features
     assert "prompt_length" in features
 

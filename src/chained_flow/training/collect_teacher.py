@@ -32,6 +32,8 @@ def teacher_dataset_features() -> Features:
     return Features(
         {
             "text": Value("string"),
+            "prompt_text": Value("string"),
+            "generated_text": Value("string"),
             "input_ids": Sequence(Value("int32")),
             "final_hidden": Sequence(Sequence(Value("float32"))),
             "example_id": Value("string"),
@@ -253,9 +255,13 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
                 hidden = final_hidden[kept_row_idx, left_pad : left_pad + input_row.shape[0]]
                 prompt_length = min(int(prompt_lengths[row_idx]), input_row.shape[0])
                 text = wrapper.decode(input_row, skip_special_tokens=False)
+                prompt_text = wrapper.decode(input_row[:prompt_length], skip_special_tokens=False)
+                generated_text = wrapper.decode(input_row[prompt_length:], skip_special_tokens=False)
                 rows.append(
                     {
                         "text": text,
+                        "prompt_text": prompt_text,
+                        "generated_text": generated_text,
                         "input_ids": input_row.detach().cpu().to(torch.int32).tolist(),
                         "final_hidden": hidden.detach().to(storage_dtype).cpu().to(torch.float32).tolist(),
                         "example_id": str(batch_examples[row_idx].get("id", batch_indices[row_idx])),

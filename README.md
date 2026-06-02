@@ -77,6 +77,8 @@ Teacher collection stores K-independent full sequences. Each row contains:
 - `example_id`, `source`, `split`: tracing and dataset-mixing metadata.
 - `text`: the exact decoded prompt plus model-generated response used for
   collection.
+- `prompt_text`: the exact formatted prompt seen by the model.
+- `generated_text`: the exact decoded model output after the prompt.
 - `format_name`, `model_id`, `hidden_dtype`, `num_tokens`: reproducibility and
   filtering metadata.
 - `prompt_length`: number of prompt tokens before greedy model generation
