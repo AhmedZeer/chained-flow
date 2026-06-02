@@ -4,11 +4,11 @@ dataset_config: main
 split: train
 source: gsm8k
 format_name: qwen_chat_qa
-limit: 5
+limit: 1024
 generation_max_new_tokens: 4096
-batch_size: 256
+batch_size: 1024
 storage_dtype: float32
 local_files_only: false
-output_dir: teacher_states/gsm8k-qwen35-08b-smoke
-push_to_hub: sghosts/cf_gsm8k_smoke_3
+output_dir: teacher_states/gsm8k-qwen35-08b-1k-train
+push_to_hub: sghosts/cf_gsm8k_1k_train
 private: false
