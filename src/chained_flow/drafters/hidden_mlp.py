@@ -43,14 +43,25 @@ class HiddenMLPDrafter(nn.Module):
         pad = hidden[:, :1, :].expand(-1, pad_len, -1)
         return torch.cat([pad, hidden], dim=1)
 
-    def predict_hidden(self, state: LMState, max_tokens: int | None = None) -> torch.Tensor:
+    def predict_from_context(self, context_hidden: torch.Tensor, max_tokens: int | None = None) -> torch.Tensor:
+        if context_hidden.ndim != 3:
+            raise ValueError("context_hidden must have shape [B, m, D]")
+        if context_hidden.shape[1] != self.config.context_size:
+            raise ValueError(
+                f"context_hidden must have context size {self.config.context_size}, "
+                f"got {context_hidden.shape[1]}"
+            )
         draft_len = self.config.draft_length if max_tokens is None else min(max_tokens, self.config.draft_length)
-        ctx = self._context(state).reshape(state.input_ids.shape[0], -1)
+        batch = context_hidden.shape[0]
+        ctx = context_hidden.reshape(batch, -1)
         return self.net(ctx).reshape(
-            state.input_ids.shape[0],
+            batch,
             self.config.draft_length,
             -1,
         )[:, :draft_len, :]
+
+    def predict_hidden(self, state: LMState, max_tokens: int | None = None) -> torch.Tensor:
+        return self.predict_from_context(self._context(state), max_tokens=max_tokens)
 
     def forward(self, state: LMState, max_tokens: int | None = None) -> torch.Tensor:
         return self.predict_hidden(state, max_tokens=max_tokens)

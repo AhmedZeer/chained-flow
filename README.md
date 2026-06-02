@@ -79,13 +79,42 @@ Teacher collection stores K-independent full sequences. Each row contains:
   collection.
 - `format_name`, `model_id`, `hidden_dtype`, `num_tokens`: reproducibility and
   filtering metadata.
+- `prompt_length`: number of prompt tokens before greedy model generation
+  starts.
 
 Training samples windows dynamically:
 
 ```text
+require t >= prompt_length - 1
 context_hidden = final_hidden[t-m+1 : t+1]
 target_hidden  = final_hidden[t : t+K]
 future_tokens  = input_ids[t+1 : t+K+1]
+```
+
+Hidden MLP training example:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run python scripts/train_hidden_mlp.py \
+  --dataset_path teacher_states/gsm8k-qwen35-08b-smoke \
+  --output_dir checkpoints/hidden-mlp-smoke \
+  --per_device_train_batch_size 8 \
+  --num_train_epochs 1 \
+  --learning_rate 1e-4 \
+  --logging_steps 10 \
+  --save_steps 100 \
+  --windows_per_epoch 32 \
+  --window_seed 0 \
+  --local_files_only true
+```
+
+The training script uses Hugging Face `Trainer` and `TrainingArguments`. It does
+not read training configuration from `.env`; pass CLI/dataclass arguments or a
+single YAML config file.
+
+Smoke YAML config example:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run python scripts/train_hidden_mlp.py train_configs/smoke_mlp.yaml
 ```
 
 GSM8K collection is prompt-only: the script asks the frozen model to generate

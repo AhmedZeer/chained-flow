@@ -39,6 +39,7 @@ def teacher_dataset_features() -> Features:
             "model_id": Value("string"),
             "hidden_dtype": Value("string"),
             "num_tokens": Value("int32"),
+            "prompt_length": Value("int32"),
         }
     )
 
@@ -100,6 +101,7 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
             input_ids = generated_ids.to(wrapper.device)
             if config.max_tokens is not None:
                 input_ids = input_ids[:, : config.max_tokens]
+            prompt_length = min(prompt_ids.shape[1], input_ids.shape[1])
             if input_ids.shape[1] < 2:
                 continue
 
@@ -119,6 +121,7 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
                     "model_id": config.model_id,
                     "hidden_dtype": config.storage_dtype,
                     "num_tokens": int(input_ids.shape[1]),
+                    "prompt_length": int(prompt_length),
                 }
             )
 
