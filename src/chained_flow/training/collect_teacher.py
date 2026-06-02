@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence as TypingSequence
 
 from datasets import Dataset, Features, Sequence, Value, load_dataset
 import torch
@@ -23,6 +23,7 @@ class TeacherCollectionConfig:
     limit: int | None = None
     max_tokens: int | None = None
     generation_max_new_tokens: int = 256
+    batch_size: int = 1
     storage_dtype: str = "float32"
     local_files_only: bool = False
 
@@ -70,6 +71,63 @@ def _iter_limited(dataset: Iterable[dict[str, Any]], limit: int | None) -> Itera
         yield index, example
 
 
+def _batched(items: Iterable[tuple[int, dict[str, Any]]], batch_size: int) -> Iterable[list[tuple[int, dict[str, Any]]]]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    batch: list[tuple[int, dict[str, Any]]] = []
+    for item in items:
+        batch.append(item)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def _ensure_padding(tokenizer: Any, eos_token_id: int | None) -> int:
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_token_id is not None:
+        return int(pad_token_id)
+    if eos_token_id is None:
+        raise ValueError("tokenizer has no pad_token_id and model has no eos_token_id")
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token_id = eos_token_id
+    return int(eos_token_id)
+
+
+def _sequence_spans(input_ids: torch.Tensor, pad_token_id: int, eos_token_id: int | None) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for row in input_ids:
+        nonpad = (row != pad_token_id).nonzero(as_tuple=False)
+        if not len(nonpad):
+            spans.append((0, 0))
+            continue
+        start = int(nonpad[0].item())
+        end = int(nonpad[-1].item() + 1)
+        if eos_token_id is not None:
+            eos_positions = (row[start:end] == eos_token_id).nonzero(as_tuple=False)
+            if len(eos_positions):
+                end = start + int(eos_positions[0].item() + 1)
+        spans.append((start, end))
+    return spans
+
+
+def _left_pad_sequences(
+    sequences: TypingSequence[torch.Tensor],
+    *,
+    pad_token_id: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    max_len = max(seq.shape[0] for seq in sequences)
+    input_ids = torch.full((len(sequences), max_len), pad_token_id, dtype=torch.long, device=device)
+    attention_mask = torch.zeros((len(sequences), max_len), dtype=torch.long, device=device)
+    for row_idx, seq in enumerate(sequences):
+        seq = seq.to(device)
+        input_ids[row_idx, -seq.shape[0] :] = seq
+        attention_mask[row_idx, -seq.shape[0] :] = 1
+    return input_ids, attention_mask
+
+
 @torch.inference_mode()
 def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, TimingStats]:
     timings = TimingStats()
@@ -81,6 +139,7 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     timings.merge(context.timings)
     wrapper = context.frozen_lm
     storage_dtype = _storage_torch_dtype(config.storage_dtype)
+    pad_token_id = _ensure_padding(wrapper.tokenizer, wrapper.eos_token_id)
     print(f"model loaded: {config.model_id}", flush=True)
 
     print(
@@ -103,41 +162,78 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
             total=total,
             desc="collecting teacher states",
         )
-        for index, example in examples:
-            prompt_text = format_gsm8k_prompt(example, wrapper.tokenizer)
-            prompt_ids = wrapper.tokenize(prompt_text)
+        for batch in _batched(examples, config.batch_size):
+            batch_indices = [index for index, _ in batch]
+            batch_examples = [example for _, example in batch]
+            prompt_texts = [format_gsm8k_prompt(example, wrapper.tokenizer) for example in batch_examples]
+            encoded = wrapper.tokenizer(
+                prompt_texts,
+                return_tensors="pt",
+                padding=True,
+            )
+            prompt_ids = encoded.input_ids.to(wrapper.device)
+            prompt_attention_mask = encoded.attention_mask.to(wrapper.device)
+            prompt_lengths = prompt_attention_mask.sum(dim=1).tolist()
             generated_ids = wrapper.model.generate(
                 input_ids=prompt_ids,
+                attention_mask=prompt_attention_mask,
                 max_new_tokens=config.generation_max_new_tokens,
                 do_sample=False,
-                pad_token_id=wrapper.eos_token_id,
+                pad_token_id=pad_token_id,
+                eos_token_id=wrapper.eos_token_id,
             )
             input_ids = generated_ids.to(wrapper.device)
             if config.max_tokens is not None:
                 input_ids = input_ids[:, : config.max_tokens]
-            prompt_length = min(prompt_ids.shape[1], input_ids.shape[1])
-            if input_ids.shape[1] < 2:
+            spans = _sequence_spans(input_ids, pad_token_id, wrapper.eos_token_id)
+            trimmed_sequences = [
+                input_ids[row_idx, start:end]
+                for row_idx, (start, end) in enumerate(spans)
+                if end - start >= 2
+            ]
+            if not trimmed_sequences:
                 continue
 
-            state, prefill_timings = wrapper.prefill(input_ids)
-            timings.merge(prefill_timings)
-            hidden = state.final_hidden[0].detach().to(storage_dtype).cpu()
-            text = wrapper.decode(input_ids[0], skip_special_tokens=False)
-            rows.append(
-                {
-                    "text": text,
-                    "input_ids": input_ids[0].detach().cpu().to(torch.int32).tolist(),
-                    "final_hidden": hidden.to(torch.float32).tolist(),
-                    "example_id": str(example.get("id", index)),
-                    "source": config.source,
-                    "split": config.split,
-                    "format_name": config.format_name,
-                    "model_id": config.model_id,
-                    "hidden_dtype": config.storage_dtype,
-                    "num_tokens": int(input_ids.shape[1]),
-                    "prompt_length": int(prompt_length),
-                }
+            padded_ids, attention_mask = _left_pad_sequences(
+                trimmed_sequences,
+                pad_token_id=pad_token_id,
+                device=wrapper.device,
             )
+            with timed_section(timings, "prefill", wrapper.device):
+                outputs = wrapper.model(
+                    input_ids=padded_ids,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    return_dict=True,
+            )
+            final_hidden = outputs.hidden_states[-1]
+            kept_row_idx = 0
+            for row_idx, (start, end) in enumerate(spans):
+                length = end - start
+                if length < 2:
+                    continue
+                input_row = trimmed_sequences[kept_row_idx]
+                left_pad = padded_ids.shape[1] - input_row.shape[0]
+                hidden = final_hidden[kept_row_idx, left_pad : left_pad + input_row.shape[0]]
+                prompt_length = min(int(prompt_lengths[row_idx]), input_row.shape[0])
+                text = wrapper.decode(input_row, skip_special_tokens=False)
+                rows.append(
+                    {
+                        "text": text,
+                        "input_ids": input_row.detach().cpu().to(torch.int32).tolist(),
+                        "final_hidden": hidden.detach().to(storage_dtype).cpu().to(torch.float32).tolist(),
+                        "example_id": str(batch_examples[row_idx].get("id", batch_indices[row_idx])),
+                        "source": config.source,
+                        "split": config.split,
+                        "format_name": config.format_name,
+                        "model_id": config.model_id,
+                        "hidden_dtype": config.storage_dtype,
+                        "num_tokens": int(input_row.shape[0]),
+                        "prompt_length": int(prompt_length),
+                    }
+                )
+                kept_row_idx += 1
 
     with timed_section(timings, "dataset_build"):
         dataset = Dataset.from_list(rows, features=teacher_dataset_features())

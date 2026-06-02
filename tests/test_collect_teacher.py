@@ -1,4 +1,6 @@
-from chained_flow.training.collect_teacher import format_gsm8k_prompt, teacher_dataset_features
+import torch
+
+from chained_flow.training.collect_teacher import _sequence_spans, format_gsm8k_prompt, teacher_dataset_features
 
 
 def test_teacher_features_text_first_and_no_attention_mask():
@@ -15,3 +17,17 @@ def test_gsm8k_format_uses_prompt_only_without_reference_answer(fake_wrapper):
     )
     assert "What is 2+2?" in text
     assert "#### 4" not in text
+
+
+def test_sequence_spans_trim_left_padding_and_stop_at_eos():
+    spans = _sequence_spans(
+        torch.tensor(
+            [
+                [0, 0, 4, 5, 6],
+                [0, 7, 8, 2, 9],
+            ]
+        ),
+        pad_token_id=0,
+        eos_token_id=2,
+    )
+    assert spans == [(2, 5), (1, 4)]
