@@ -40,10 +40,7 @@ class LossArguments:
     lambda_cos: float = 0.2
     lambda_norm: float = 0.05
     lambda_ce: float = 0.2
-    lambda_kl: float = 0.1
     lambda_expected_accept: float = 0.1
-    lambda_delta: float = 0.0
-    kl_temperature: float = 1.0
     position_gamma: float = 0.8
 
 
@@ -67,10 +64,7 @@ def loss_config_from_args(args: LossArguments) -> DrafterLossConfig:
         lambda_cos=args.lambda_cos,
         lambda_norm=args.lambda_norm,
         lambda_ce=args.lambda_ce,
-        lambda_kl=args.lambda_kl,
         lambda_expected_accept=args.lambda_expected_accept,
-        lambda_delta=args.lambda_delta,
-        kl_temperature=args.kl_temperature,
         position_gamma=args.position_gamma,
     )
 

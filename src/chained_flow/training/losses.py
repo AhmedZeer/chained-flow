@@ -16,10 +16,7 @@ class DrafterLossConfig:
     lambda_cos: float = 0.2
     lambda_norm: float = 0.05
     lambda_ce: float = 0.2
-    lambda_kl: float = 0.1
     lambda_expected_accept: float = 0.1
-    lambda_delta: float = 0.0
-    kl_temperature: float = 1.0
     position_gamma: float = 0.8
     eps: float = 1e-8
 
@@ -80,14 +77,6 @@ def hidden_norm_loss(pred_hidden: torch.Tensor, target_hidden: torch.Tensor) -> 
     return F.mse_loss(pred_norm, target_norm)
 
 
-def hidden_delta_loss(pred_hidden: torch.Tensor, target_hidden: torch.Tensor) -> torch.Tensor:
-    if pred_hidden.shape[1] < 2:
-        return pred_hidden.new_zeros(())
-    pred_delta = pred_hidden[:, 1:, :] - pred_hidden[:, :-1, :]
-    target_delta = target_hidden[:, 1:, :] - target_hidden[:, :-1, :]
-    return F.mse_loss(pred_delta, target_delta)
-
-
 def position_weighted_ce_loss(
     logits: torch.Tensor,
     future_tokens: torch.Tensor,
@@ -102,19 +91,6 @@ def position_weighted_ce_loss(
     ).reshape(batch, length)
     weights = _position_weights(length, gamma, logits.device).to(ce.dtype)
     return (ce * weights.unsqueeze(0)).sum() / (weights.sum() * batch)
-
-
-def teacher_kl_loss(
-    pred_logits: torch.Tensor,
-    target_logits: torch.Tensor,
-    *,
-    temperature: float,
-) -> torch.Tensor:
-    if temperature <= 0.0:
-        raise ValueError("kl_temperature must be positive")
-    pred_log_probs = F.log_softmax(pred_logits / temperature, dim=-1)
-    target_probs = F.softmax(target_logits / temperature, dim=-1)
-    return F.kl_div(pred_log_probs, target_probs, reduction="batchmean") * (temperature**2)
 
 
 def expected_acceptance_loss(
@@ -149,18 +125,15 @@ def compute_drafter_loss(
     components["hidden.mse"] = hidden_mse_loss(pred_hidden, target_hidden)
     components["hidden.cos"] = hidden_cosine_loss(pred_hidden, target_hidden)
     components["hidden.norm"] = hidden_norm_loss(pred_hidden, target_hidden)
-    components["hidden.delta"] = hidden_delta_loss(pred_hidden, target_hidden)
 
     weights = {
         "hidden.mse": config.lambda_mse,
         "hidden.cos": config.lambda_cos,
         "hidden.norm": config.lambda_norm,
-        "hidden.delta": config.lambda_delta,
     }
 
     needs_logits = (
         config.lambda_ce != 0.0
-        or config.lambda_kl != 0.0
         or config.lambda_expected_accept != 0.0
     )
     if needs_logits:
@@ -170,18 +143,11 @@ def compute_drafter_loss(
             raise ValueError("future_tokens is required when logit/token or verifier losses are enabled")
 
         pred_logits = lm_head(pred_hidden)
-        with torch.no_grad():
-            target_logits = lm_head(target_hidden)
 
         components["logit.ce"] = position_weighted_ce_loss(
             pred_logits,
             future_tokens,
             gamma=config.position_gamma,
-        )
-        components["logit.kl"] = teacher_kl_loss(
-            pred_logits,
-            target_logits,
-            temperature=config.kl_temperature,
         )
         components["verifier.expected_accept"] = expected_acceptance_loss(
             pred_logits,
@@ -192,7 +158,6 @@ def compute_drafter_loss(
         weights.update(
             {
                 "logit.ce": config.lambda_ce,
-                "logit.kl": config.lambda_kl,
                 "verifier.expected_accept": config.lambda_expected_accept,
             }
         )

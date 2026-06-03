@@ -55,6 +55,8 @@ def load_yaml_args(path: Path) -> argparse.Namespace:
         tmp_output_dir=Path(data["tmp_output_dir"]) if data.get("tmp_output_dir") else tmp_output_dir(data["output_dir"]),
         push_to_hub=data.get("push_to_hub"),
         tmp_push_to_hub=data.get("tmp_push_to_hub") or tmp_hub_id(data.get("push_to_hub")),
+        answer_dataset_path=data.get("answer_dataset_path"),
+        answer_dataset_split=data.get("answer_dataset_split"),
         private=bool(data.get("private", False)),
     )
 
@@ -91,6 +93,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tmp-output-dir", type=Path, default=None)
     parser.add_argument("--push-to-hub", default=None, help="Optional HF repo id, e.g. user/dataset-name.")
     parser.add_argument("--tmp-push-to-hub", default=None, help="Optional temp HF repo id for generated answers only.")
+    parser.add_argument(
+        "--answer-dataset-path",
+        default=None,
+        help="Optional local save_to_disk path or HF repo id for a temporary answer-only dataset.",
+    )
+    parser.add_argument("--answer-dataset-split", default=None, help="Split for HF answer datasets; defaults to train.")
     parser.add_argument("--private", action="store_true")
     args = parser.parse_args()
     args.tmp_output_dir = args.tmp_output_dir or tmp_output_dir(args.output_dir)
@@ -118,6 +126,8 @@ def main() -> None:
         seed=args.seed,
         tmp_output_dir=str(args.tmp_output_dir) if args.tmp_output_dir else None,
         tmp_push_to_hub=args.tmp_push_to_hub,
+        answer_dataset_path=args.answer_dataset_path,
+        answer_dataset_split=args.answer_dataset_split,
         private=args.private,
     )
     dataset, timings = collect_teacher_dataset(config)

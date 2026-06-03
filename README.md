@@ -37,16 +37,12 @@ These keep predicted states close to the frozen LM's final hidden-state manifold
 - `hidden.mse`: mean squared error between predicted and teacher hidden states.
 - `hidden.cos`: cosine distance between predicted and teacher hidden directions.
 - `hidden.norm`: activation-norm matching between predicted and teacher states.
-- `hidden.delta`: local trajectory matching between consecutive predicted and
-  teacher hidden states.
 
 ### Logit / token losses
 
 These use the frozen LM head to check what predicted hidden states decode to.
 
 - `logit.ce`: position-weighted cross entropy against future token ids.
-- `logit.kl`: KL distillation from `lm_head(target_hidden)` to
-  `lm_head(pred_hidden)`.
 
 ### Verifier-based losses
 
@@ -64,7 +60,6 @@ L =
 + 0.2  * hidden.cos
 + 0.05 * hidden.norm
 + 0.2  * logit.ce
-+ 0.1  * logit.kl
 + 0.1  * verifier.expected_accept
 ```
 
@@ -135,6 +130,22 @@ come from CLI args or a YAML config, not `.env`.
 
 Collection first writes/pushes a temporary answer-only dataset using a `_tmp`
 prefix, then runs hidden-state extraction and writes the final dataset.
+
+To skip generation and extract hidden states from a previously saved `_tmp`
+answer dataset:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run python scripts/collect_teacher_states.py \
+  --answer-dataset-path teacher_states/_tmp_gsm8k-qwen35-08b-smoke \
+  --output-dir teacher_states/gsm8k-qwen35-08b-smoke \
+  --model-id Qwen/Qwen3.5-0.8B \
+  --storage-dtype float16 \
+  --dtype float16
+```
+
+`--answer-dataset-path` accepts either a local `save_to_disk` path or a Hugging
+Face dataset repo id. Use `--answer-dataset-split` for HF repos when the split
+is not `train`.
 
 Set `device: cuda` or `device: cuda:0` in collection/training YAML configs to
 load the frozen model on CUDA. Use `device: auto` to let Transformers choose a

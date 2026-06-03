@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Sequence as TypingSequence
 
-from datasets import Dataset, Features, Sequence, Value, load_dataset
+from datasets import Dataset, Features, Sequence, Value, load_dataset, load_from_disk
 import torch
 from tqdm.auto import tqdm
 
@@ -31,6 +32,8 @@ class TeacherCollectionConfig:
     seed: int = 0
     tmp_output_dir: str | None = None
     tmp_push_to_hub: str | None = None
+    answer_dataset_path: str | None = None
+    answer_dataset_split: str | None = None
     private: bool = False
 
 
@@ -214,6 +217,39 @@ def _left_pad_sequences(
     return input_ids, attention_mask
 
 
+def _load_answer_dataset(path_or_repo: str, split: str | None) -> Dataset:
+    path = Path(path_or_repo)
+    if path.exists():
+        return load_from_disk(str(path))
+    return load_dataset(path_or_repo, split=split or "train")
+
+
+def _answer_row_from_dataset_row(row: dict[str, Any], *, storage_dtype: str) -> dict[str, Any]:
+    input_ids = [int(token_id) for token_id in row["input_ids"]]
+    return {
+        "text": row["text"],
+        "prompt_text": row["prompt_text"],
+        "generated_text": row["generated_text"],
+        "input_ids": input_ids,
+        "example_id": str(row["example_id"]),
+        "source": row["source"],
+        "split": row["split"],
+        "format_name": row["format_name"],
+        "model_id": row["model_id"],
+        "hidden_dtype": storage_dtype,
+        "num_tokens": int(row.get("num_tokens", len(input_ids))),
+        "prompt_length": int(row["prompt_length"]),
+    }
+
+
+def _limited_answer_rows(answer_dataset: Dataset, *, limit: int | None, storage_dtype: str) -> list[dict[str, Any]]:
+    total = min(limit, len(answer_dataset)) if limit is not None else len(answer_dataset)
+    return [
+        _answer_row_from_dataset_row(answer_dataset[index], storage_dtype=storage_dtype)
+        for index in range(total)
+    ]
+
+
 @torch.inference_mode()
 def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, TimingStats]:
     torch.manual_seed(config.seed)
@@ -235,86 +271,101 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     print(f"model loaded: {config.model_id}", flush=True)
     print(f"model device: {wrapper.device}", flush=True)
 
-    print(
-        f"loading dataset: {config.dataset_name}/{config.dataset_config} split={config.split}",
-        flush=True,
-    )
-    with timed_section(timings, "dataset_load"):
-        raw_dataset = load_dataset(
-            config.dataset_name,
-            config.dataset_config,
-            split=config.split,
-        )
-    print(f"dataset loaded: rows={len(raw_dataset)}", flush=True)
-
     answer_rows: list[dict[str, Any]] = []
     with timed_section(timings, "teacher_collection", wrapper.device):
-        total = min(config.limit, len(raw_dataset)) if config.limit is not None else len(raw_dataset)
-        batches = list(_batched(_iter_limited(raw_dataset, config.limit), config.batch_size))
-        generation_bar = tqdm(total=total, desc="phase 1/2 generating answers")
-        with timed_section(timings, "teacher_generation", wrapper.device):
-            for batch in batches:
-                batch_indices = [index for index, _ in batch]
-                batch_examples = [example for _, example in batch]
-                prompt_texts = [format_gsm8k_prompt(example, wrapper.tokenizer) for example in batch_examples]
-                encoded = wrapper.tokenizer(
-                    prompt_texts,
-                    return_tensors="pt",
-                    padding=True,
+        if config.answer_dataset_path:
+            print(
+                f"loading answer dataset: {config.answer_dataset_path} split={config.answer_dataset_split or 'train'}",
+                flush=True,
+            )
+            with timed_section(timings, "answer_dataset_load", wrapper.device):
+                answer_dataset = _load_answer_dataset(config.answer_dataset_path, config.answer_dataset_split)
+            print(f"answer dataset loaded: rows={len(answer_dataset)}", flush=True)
+            with timed_section(timings, "answer_dataset_rows", wrapper.device):
+                answer_rows = _limited_answer_rows(
+                    answer_dataset,
+                    limit=config.limit,
+                    storage_dtype=config.storage_dtype,
                 )
-                prompt_ids = encoded.input_ids.to(wrapper.device)
-                prompt_attention_mask = encoded.attention_mask.to(wrapper.device)
-                prompt_lengths = prompt_attention_mask.sum(dim=1).tolist()
-                generated_ids = wrapper.model.generate(
-                    input_ids=prompt_ids,
-                    attention_mask=prompt_attention_mask,
-                    max_new_tokens=config.generation_max_new_tokens,
-                    do_sample=False,
-                    temperature=None,
-                    top_p=None,
-                    top_k=None,
-                    pad_token_id=pad_token_id,
-                    eos_token_id=eos_token_ids,
+        else:
+            print(
+                f"loading dataset: {config.dataset_name}/{config.dataset_config} split={config.split}",
+                flush=True,
+            )
+            with timed_section(timings, "dataset_load", wrapper.device):
+                raw_dataset = load_dataset(
+                    config.dataset_name,
+                    config.dataset_config,
+                    split=config.split,
                 )
-                generation_bar.update(len(batch))
-                input_ids = generated_ids.to(wrapper.device)
-                if config.max_tokens is not None:
-                    input_ids = input_ids[:, : config.max_tokens]
-                spans = _sequence_spans(input_ids, pad_token_id, eos_token_ids, prompt_lengths)
-                for row_idx, (start, end) in enumerate(spans):
-                    input_row = input_ids[row_idx, start:end]
-                    if input_row.shape[0] < 2:
-                        continue
-                    prompt_length = min(int(prompt_lengths[row_idx]), input_row.shape[0])
-                    text = wrapper.decode(input_row, skip_special_tokens=False)
-                    prompt_text = wrapper.decode(input_row[:prompt_length], skip_special_tokens=False)
-                    generated_text = wrapper.decode(input_row[prompt_length:], skip_special_tokens=False)
-                    answer_rows.append(
-                        {
-                            "text": text,
-                            "prompt_text": prompt_text,
-                            "generated_text": generated_text,
-                            "input_ids": input_row.detach().cpu().to(torch.int32).tolist(),
-                            "example_id": str(batch_examples[row_idx].get("id", batch_indices[row_idx])),
-                            "source": config.source,
-                            "split": config.split,
-                            "format_name": config.format_name,
-                            "model_id": config.model_id,
-                            "hidden_dtype": config.storage_dtype,
-                            "num_tokens": int(input_row.shape[0]),
-                            "prompt_length": int(prompt_length),
-                        }
-                    )
-        generation_bar.close()
+            print(f"dataset loaded: rows={len(raw_dataset)}", flush=True)
 
-        with timed_section(timings, "tmp_answer_dataset_build"):
-            answer_dataset = Dataset.from_list(answer_rows, features=teacher_answer_dataset_features())
-        if config.tmp_output_dir:
-            print(f"saving temporary answer dataset: {config.tmp_output_dir}", flush=True)
-            answer_dataset.save_to_disk(config.tmp_output_dir)
-        if config.tmp_push_to_hub:
-            print(f"pushing temporary answer dataset: {config.tmp_push_to_hub}", flush=True)
-            answer_dataset.push_to_hub(config.tmp_push_to_hub, private=config.private)
+            total = min(config.limit, len(raw_dataset)) if config.limit is not None else len(raw_dataset)
+            batches = list(_batched(_iter_limited(raw_dataset, config.limit), config.batch_size))
+            generation_bar = tqdm(total=total, desc="phase 1/2 generating answers")
+            with timed_section(timings, "teacher_generation", wrapper.device):
+                for batch in batches:
+                    batch_indices = [index for index, _ in batch]
+                    batch_examples = [example for _, example in batch]
+                    prompt_texts = [format_gsm8k_prompt(example, wrapper.tokenizer) for example in batch_examples]
+                    encoded = wrapper.tokenizer(
+                        prompt_texts,
+                        return_tensors="pt",
+                        padding=True,
+                    )
+                    prompt_ids = encoded.input_ids.to(wrapper.device)
+                    prompt_attention_mask = encoded.attention_mask.to(wrapper.device)
+                    prompt_lengths = prompt_attention_mask.sum(dim=1).tolist()
+                    generated_ids = wrapper.model.generate(
+                        input_ids=prompt_ids,
+                        attention_mask=prompt_attention_mask,
+                        max_new_tokens=config.generation_max_new_tokens,
+                        do_sample=False,
+                        temperature=None,
+                        top_p=None,
+                        top_k=None,
+                        pad_token_id=pad_token_id,
+                        eos_token_id=eos_token_ids,
+                    )
+                    generation_bar.update(len(batch))
+                    input_ids = generated_ids.to(wrapper.device)
+                    if config.max_tokens is not None:
+                        input_ids = input_ids[:, : config.max_tokens]
+                    spans = _sequence_spans(input_ids, pad_token_id, eos_token_ids, prompt_lengths)
+                    for row_idx, (start, end) in enumerate(spans):
+                        input_row = input_ids[row_idx, start:end]
+                        if input_row.shape[0] < 2:
+                            continue
+                        prompt_length = min(int(prompt_lengths[row_idx]), input_row.shape[0])
+                        text = wrapper.decode(input_row, skip_special_tokens=False)
+                        prompt_text = wrapper.decode(input_row[:prompt_length], skip_special_tokens=False)
+                        generated_text = wrapper.decode(input_row[prompt_length:], skip_special_tokens=False)
+                        answer_rows.append(
+                            {
+                                "text": text,
+                                "prompt_text": prompt_text,
+                                "generated_text": generated_text,
+                                "input_ids": input_row.detach().cpu().to(torch.int32).tolist(),
+                                "example_id": str(batch_examples[row_idx].get("id", batch_indices[row_idx])),
+                                "source": config.source,
+                                "split": config.split,
+                                "format_name": config.format_name,
+                                "model_id": config.model_id,
+                                "hidden_dtype": config.storage_dtype,
+                                "num_tokens": int(input_row.shape[0]),
+                                "prompt_length": int(prompt_length),
+                            }
+                        )
+            generation_bar.close()
+
+            with timed_section(timings, "tmp_answer_dataset_build", wrapper.device):
+                answer_dataset = Dataset.from_list(answer_rows, features=teacher_answer_dataset_features())
+            if config.tmp_output_dir:
+                print(f"saving temporary answer dataset: {config.tmp_output_dir}", flush=True)
+                answer_dataset.save_to_disk(config.tmp_output_dir)
+            if config.tmp_push_to_hub:
+                print(f"pushing temporary answer dataset: {config.tmp_push_to_hub}", flush=True)
+                answer_dataset.push_to_hub(config.tmp_push_to_hub, private=config.private)
 
         rows: list[dict[str, Any]] = []
         hidden_bar = tqdm(total=len(answer_rows), desc="phase 2/2 extracting hidden states")

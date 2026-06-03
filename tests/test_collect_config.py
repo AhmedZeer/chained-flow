@@ -24,3 +24,5 @@ def test_smoke_gsm8k_collection_yaml_parses():
     assert args.output_dir == Path("teacher_states/gsm8k-qwen35-08b-smoke")
     assert args.tmp_output_dir == Path("teacher_states/_tmp_gsm8k-qwen35-08b-smoke")
     assert args.tmp_push_to_hub is None
+    assert args.answer_dataset_path is None
+    assert args.answer_dataset_split is None

@@ -10,7 +10,7 @@ def test_hidden_only_loss_does_not_require_lm_head():
     output = compute_drafter_loss(
         pred,
         target,
-        config=DrafterLossConfig(lambda_ce=0.0, lambda_kl=0.0, lambda_expected_accept=0.0),
+        config=DrafterLossConfig(lambda_ce=0.0, lambda_expected_accept=0.0),
     )
 
     assert output.total.item() == pytest.approx(0.0)
@@ -18,7 +18,6 @@ def test_hidden_only_loss_does_not_require_lm_head():
         "hidden.mse",
         "hidden.cos",
         "hidden.norm",
-        "hidden.delta",
     }
 
 
@@ -48,12 +47,10 @@ def test_combined_loss_has_expected_categories(fake_wrapper):
 
     assert "hidden.mse" in output.components
     assert "logit.ce" in output.components
-    assert "logit.kl" in output.components
     assert "verifier.expected_accept" in output.components
     assert output.components["hidden.mse"].item() == pytest.approx(0.0)
     assert output.components["hidden.norm"].item() == pytest.approx(0.0)
     assert output.components["logit.ce"].item() < 0.001
-    assert output.components["logit.kl"].item() == pytest.approx(0.0, abs=1e-6)
     assert output.components["verifier.expected_accept"].item() < -0.99
 
 

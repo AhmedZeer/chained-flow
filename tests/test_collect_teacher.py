@@ -1,6 +1,7 @@
 import torch
 
 from chained_flow.training.collect_teacher import (
+    _answer_row_from_dataset_row,
     _backbone,
     _model_torch_dtype,
     _sequence_spans,
@@ -21,6 +22,30 @@ def test_teacher_features_text_first_and_no_attention_mask():
 def test_teacher_features_support_float16_hidden_storage():
     features = teacher_dataset_features("float16")
     assert str(features["final_hidden"].feature.feature.dtype) == "float16"
+
+
+def test_answer_row_from_dataset_row_updates_hidden_dtype():
+    row = _answer_row_from_dataset_row(
+        {
+            "text": "ab",
+            "prompt_text": "a",
+            "generated_text": "b",
+            "input_ids": [1, 2],
+            "example_id": "x",
+            "source": "tmp",
+            "split": "train",
+            "format_name": "fmt",
+            "model_id": "model",
+            "hidden_dtype": "float32",
+            "num_tokens": 2,
+            "prompt_length": 1,
+        },
+        storage_dtype="float16",
+    )
+
+    assert row["input_ids"] == [1, 2]
+    assert row["hidden_dtype"] == "float16"
+    assert row["num_tokens"] == 2
 
 
 def test_gsm8k_format_uses_prompt_only_without_reference_answer(fake_wrapper):
