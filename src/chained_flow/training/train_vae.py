@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from torch import nn
 from transformers import Trainer, TrainingArguments
+from transformers.trainer_utils import IntervalStrategy, SaveStrategy
 
 from chained_flow.training.vae_dataset import TeacherHiddenTokenDataset, collate_hidden_tokens
 from chained_flow.training.vae_losses import HiddenVAELossConfig, compute_hidden_vae_loss
@@ -30,6 +31,8 @@ class VAEDataArguments:
     tokens_per_epoch: int | None = None
     token_seed: int = 0
     response_only: bool = True
+    validation_fraction: float = 0.1
+    split_seed: int = 0
 
 
 @dataclass
@@ -120,6 +123,15 @@ def train_vae_with_trainer(
         f"rows={len(dataset.dataset)} response_only={data_args.response_only}",
         flush=True,
     )
+    train_dataset, eval_dataset = dataset.train_val_split(
+        val_fraction=data_args.validation_fraction,
+        seed=data_args.split_seed,
+    )
+    print(
+        f"VAE validation split initialized: train_tokens={train_dataset.hidden_tokens.shape[0]} "
+        f"val_tokens={eval_dataset.hidden_tokens.shape[0]} val_fraction={data_args.validation_fraction}",
+        flush=True,
+    )
     print(
         f"initializing VAE model: type={model_args.vae_type} "
         f"hidden_size={model_args.hidden_size} latent_size={model_args.latent_size} "
@@ -134,10 +146,13 @@ def train_vae_with_trainer(
     model_device = next(model.parameters()).device
     print(f"VAE model device: {model_device}", flush=True)
     print(f"initializing VAE trainer: output_dir={training_args.output_dir}", flush=True)
+    training_args.eval_strategy = IntervalStrategy.EPOCH
+    training_args.save_strategy = SaveStrategy.EPOCH
     trainer = VAEComponentLoggingTrainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         data_collator=collate_hidden_tokens,
     )
     print("VAE trainer initialized", flush=True)

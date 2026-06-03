@@ -1,5 +1,5 @@
-# dataset_path: sghosts/cf_gsm8k_1k_train
-dataset_path: sghosts/cf_gsm8k_64_train_v1
+dataset_path: sghosts/cf_gsm8k_1k_train
+# dataset_path: sghosts/cf_gsm8k_64_train_v1
 dataset_split: train
 output_dir: /content/drive/MyDrive/chained-flow/vae/ckpts/hidden-vae-smoke
 
@@ -12,6 +12,8 @@ device: cuda
 tokens_per_epoch: # debug only.
 token_seed: 0
 response_only: true
+validation_fraction: 0.1
+split_seed: 0
 
 lambda_mse: 1.0
 lambda_cos: 0.2
@@ -22,7 +24,8 @@ free_bits: 0.0
 per_device_train_batch_size: 32
 num_train_epochs: 50 # overfit
 learning_rate: 0.0001
-save_steps: 100
+eval_strategy: epoch
+save_strategy: epoch
 save_total_limit: 2
 report_to: none
 logging_steps: 50

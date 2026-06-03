@@ -14,6 +14,37 @@ class TeacherHiddenToken:
     hidden: torch.Tensor
 
 
+class HiddenTokenTensorDataset(TorchDataset):
+    def __init__(
+        self,
+        hidden_tokens: torch.Tensor,
+        *,
+        tokens_per_epoch: int | None = None,
+        seed: int = 0,
+        sample: bool = True,
+    ):
+        if hidden_tokens.ndim != 2:
+            raise ValueError("hidden_tokens must have shape [tokens, hidden_size]")
+        if hidden_tokens.shape[0] == 0:
+            raise ValueError("hidden_tokens must contain at least one token")
+        self.hidden_tokens = hidden_tokens.contiguous()
+        self.tokens_per_epoch = tokens_per_epoch or int(hidden_tokens.shape[0])
+        self.seed = seed
+        self.sample = sample
+
+    def __len__(self) -> int:
+        return self.tokens_per_epoch if self.sample else int(self.hidden_tokens.shape[0])
+
+    def _token_index(self, index: int) -> int:
+        if not self.sample:
+            return index
+        rng = random.Random(self.seed + index)
+        return rng.randrange(int(self.hidden_tokens.shape[0]))
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        return {"hidden": self.hidden_tokens[self._token_index(index)]}
+
+
 class TeacherHiddenTokenDataset(TorchDataset):
     def __init__(
         self,
@@ -26,6 +57,7 @@ class TeacherHiddenTokenDataset(TorchDataset):
         self.dataset = dataset
         self.seed = seed
         self.response_only = response_only
+        self.requested_tokens_per_epoch = tokens_per_epoch
         self.valid_rows: list[tuple[int, int, int]] = []
         lengths = dataset["num_tokens"]
         prompt_lengths = dataset["prompt_length"] if response_only and "prompt_length" in dataset.column_names else None
@@ -93,6 +125,35 @@ class TeacherHiddenTokenDataset(TorchDataset):
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         return {"hidden": self.hidden_tokens[self._sample_token_index(index)]}
+
+    def train_val_split(
+        self,
+        *,
+        val_fraction: float = 0.1,
+        seed: int = 0,
+    ) -> tuple[HiddenTokenTensorDataset, HiddenTokenTensorDataset]:
+        if not 0.0 < val_fraction < 1.0:
+            raise ValueError("val_fraction must be in (0, 1)")
+        total = int(self.hidden_tokens.shape[0])
+        val_count = max(1, int(total * val_fraction))
+        if val_count >= total:
+            raise ValueError("not enough hidden tokens to create a non-empty train/val split")
+        generator = torch.Generator().manual_seed(seed)
+        permutation = torch.randperm(total, generator=generator)
+        val_indices = permutation[:val_count]
+        train_indices = permutation[val_count:]
+        train_tokens_per_epoch = self.requested_tokens_per_epoch or int(train_indices.numel())
+        train_dataset = HiddenTokenTensorDataset(
+            self.hidden_tokens[train_indices],
+            tokens_per_epoch=train_tokens_per_epoch,
+            seed=self.seed,
+            sample=True,
+        )
+        val_dataset = HiddenTokenTensorDataset(
+            self.hidden_tokens[val_indices],
+            sample=False,
+        )
+        return train_dataset, val_dataset
 
 
 def collate_hidden_tokens(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:

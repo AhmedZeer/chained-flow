@@ -44,6 +44,25 @@ def test_teacher_hidden_token_dataset_flattens_response_hidden_tokens():
     assert len(token_dataset) == 3
 
 
+def test_teacher_hidden_token_dataset_train_val_split_uses_held_out_tokens():
+    dataset = Dataset.from_list(
+        [
+            {
+                "final_hidden": [[float(index), float(index)] for index in range(10)],
+                "num_tokens": 10,
+                "prompt_length": 0,
+            }
+        ]
+    )
+    token_dataset = TeacherHiddenTokenDataset(dataset, seed=0, response_only=True)
+    train_dataset, val_dataset = token_dataset.train_val_split(val_fraction=0.2, seed=0)
+
+    assert train_dataset.hidden_tokens.shape == (8, 2)
+    assert val_dataset.hidden_tokens.shape == (2, 2)
+    assert len(train_dataset) == 8
+    assert len(val_dataset) == 2
+
+
 def test_collate_hidden_tokens_stacks_batch():
     batch = [{"hidden": torch.zeros(2)}, {"hidden": torch.ones(2)}]
     collated = collate_hidden_tokens(batch)
