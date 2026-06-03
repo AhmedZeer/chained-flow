@@ -6,6 +6,7 @@ vae_type: residual_mlp
 hidden_size: 1024
 latent_size: 256
 intermediate_size: 512
+device: cuda
 
 tokens_per_epoch: 1024
 token_seed: 0

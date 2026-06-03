@@ -30,6 +30,7 @@ def test_smoke_vae_yaml_parses():
 
     assert model_args.vae_type == "residual_mlp"
     assert model_args.latent_size == 256
+    assert model_args.device == "cuda"
     assert data_args.dataset_path == "sghosts/cf_gsm8k_1k_train"
     assert data_args.dataset_split == "train"
     assert data_args.tokens_per_epoch == 1024

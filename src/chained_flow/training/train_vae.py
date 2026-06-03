@@ -20,6 +20,7 @@ class VAEModelArguments:
     hidden_size: int = 1024
     latent_size: int = 256
     intermediate_size: int = 512
+    device: str | None = None
 
 
 @dataclass
@@ -126,6 +127,8 @@ def train_vae_with_trainer(
         flush=True,
     )
     model = HiddenVAETrainingModule(model_args, loss_args)
+    if model_args.device:
+        model = model.to(torch.device(model_args.device))
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     print(f"VAE model initialized: parameters={parameter_count}", flush=True)
     model_device = next(model.parameters()).device
