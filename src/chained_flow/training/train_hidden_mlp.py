@@ -23,6 +23,7 @@ class HiddenMLPModelArguments:
     context_size: int = 4
     draft_length: int = 4
     hidden_multiplier: int = 2
+    vae_dir: str | None = None
     local_files_only: bool = False
     device: str | None = None
 
@@ -39,6 +40,8 @@ class LossArguments:
     lambda_mse: float = 1.0
     lambda_cos: float = 0.2
     lambda_norm: float = 0.05
+    lambda_latent_mse: float = 0.0
+    lambda_latent_cos: float = 0.0
     lambda_ce: float = 0.2
     lambda_expected_accept: float = 0.1
     position_gamma: float = 0.8
@@ -63,6 +66,8 @@ def loss_config_from_args(args: LossArguments) -> DrafterLossConfig:
         lambda_mse=args.lambda_mse,
         lambda_cos=args.lambda_cos,
         lambda_norm=args.lambda_norm,
+        lambda_latent_mse=args.lambda_latent_mse,
+        lambda_latent_cos=args.lambda_latent_cos,
         lambda_ce=args.lambda_ce,
         lambda_expected_accept=args.lambda_expected_accept,
         position_gamma=args.position_gamma,
@@ -97,6 +102,7 @@ def train_hidden_mlp_with_trainer(
             context_size=model_args.context_size,
             draft_length=model_args.draft_length,
             hidden_multiplier=model_args.hidden_multiplier,
+            vae_dir=model_args.vae_dir,
         ),
         loss_config_from_args(loss_args),
     )

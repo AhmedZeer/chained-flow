@@ -7,8 +7,12 @@ device:
 context_size: 4
 draft_length: 4
 hidden_multiplier: 2
+vae_dir:
 windows_per_epoch: 32
 window_seed: 0
+
+lambda_latent_mse: 0.0
+lambda_latent_cos: 0.0
 
 per_device_train_batch_size: 8
 num_train_epochs: 1

@@ -13,6 +13,7 @@ from chained_flow.timing import TimingStats
 class DraftResult:
     tokens: torch.Tensor
     hidden_states: torch.Tensor | None = None
+    latent_states: torch.Tensor | None = None
     logits: torch.Tensor | None = None
     timings: TimingStats = field(default_factory=TimingStats)
 

@@ -14,6 +14,7 @@ from chained_flow.training.losses import DrafterLossConfig, compute_drafter_loss
 class HiddenMLPTrainingOutput:
     loss: torch.Tensor
     pred_hidden: torch.Tensor
+    pred_latent: torch.Tensor | None
     components: dict[str, torch.Tensor]
 
 
@@ -47,10 +48,19 @@ class HiddenMLPTrainingModule(nn.Module):
         target_hidden: torch.Tensor,
         future_tokens: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        pred_hidden = self.drafter.predict_from_context(context_hidden)
+        pred_latent = None
+        target_latent = None
+        if self.drafter.uses_vae:
+            pred_latent = self.drafter.predict_latent_from_context(context_hidden)
+            pred_hidden = self.drafter.decode_latent(pred_latent)
+            target_latent = self.drafter.encode_hidden(target_hidden)
+        else:
+            pred_hidden = self.drafter.predict_from_context(context_hidden)
         loss_output = compute_drafter_loss(
             pred_hidden,
             target_hidden,
+            pred_latent=pred_latent,
+            target_latent=target_latent,
             future_tokens=future_tokens,
             lm_head=self.lm_head,
             config=self.loss_config,
@@ -59,6 +69,8 @@ class HiddenMLPTrainingModule(nn.Module):
             "loss": loss_output.total,
             "pred_hidden": pred_hidden,
         }
+        if pred_latent is not None:
+            output["pred_latent"] = pred_latent
         for name, value in loss_output.components.items():
             output[f"loss_component/{name}"] = value.detach()
         return output

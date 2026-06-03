@@ -21,6 +21,30 @@ def test_hidden_only_loss_does_not_require_lm_head():
     }
 
 
+def test_latent_losses_are_optional_components():
+    pred = torch.zeros(2, 3, 4)
+    target = torch.zeros(2, 3, 4)
+    pred_latent = torch.zeros(2, 3, 2)
+    target_latent = torch.ones(2, 3, 2)
+
+    output = compute_drafter_loss(
+        pred,
+        target,
+        pred_latent=pred_latent,
+        target_latent=target_latent,
+        config=DrafterLossConfig(
+            lambda_ce=0.0,
+            lambda_expected_accept=0.0,
+            lambda_latent_mse=1.0,
+            lambda_latent_cos=0.5,
+        ),
+    )
+
+    assert "latent.mse" in output.components
+    assert "latent.cos" in output.components
+    assert output.components["latent.mse"].item() == pytest.approx(1.0)
+
+
 def test_logit_losses_require_lm_head_and_tokens():
     pred = torch.zeros(1, 2, 4)
     target = torch.zeros(1, 2, 4)

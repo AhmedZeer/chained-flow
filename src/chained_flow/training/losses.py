@@ -15,6 +15,8 @@ class DrafterLossConfig:
     lambda_mse: float = 1.0
     lambda_cos: float = 0.2
     lambda_norm: float = 0.05
+    lambda_latent_mse: float = 0.0
+    lambda_latent_cos: float = 0.0
     lambda_ce: float = 0.2
     lambda_expected_accept: float = 0.1
     position_gamma: float = 0.8
@@ -50,6 +52,16 @@ def _validate_shapes(
         )
 
 
+def _validate_latent_shapes(pred_latent: torch.Tensor, target_latent: torch.Tensor) -> None:
+    if pred_latent.shape != target_latent.shape:
+        raise ValueError(
+            f"pred_latent and target_latent must have identical shape, got "
+            f"{tuple(pred_latent.shape)} and {tuple(target_latent.shape)}"
+        )
+    if pred_latent.ndim != 3:
+        raise ValueError("pred_latent and target_latent must have shape [B, K, Z]")
+
+
 def _position_weights(length: int, gamma: float, device: torch.device) -> torch.Tensor:
     if not 0.0 < gamma <= 1.0:
         raise ValueError("position_gamma must be in (0, 1]")
@@ -75,6 +87,21 @@ def hidden_norm_loss(pred_hidden: torch.Tensor, target_hidden: torch.Tensor) -> 
     pred_norm = pred_hidden.norm(dim=-1)
     target_norm = target_hidden.norm(dim=-1)
     return F.mse_loss(pred_norm, target_norm)
+
+
+def latent_mse_loss(pred_latent: torch.Tensor, target_latent: torch.Tensor) -> torch.Tensor:
+    return F.mse_loss(pred_latent, target_latent)
+
+
+def latent_cosine_loss(pred_latent: torch.Tensor, target_latent: torch.Tensor) -> torch.Tensor:
+    pred = pred_latent.reshape(-1, pred_latent.shape[-1])
+    target = target_latent.reshape(-1, target_latent.shape[-1])
+    pred_norm = pred.norm(dim=-1)
+    target_norm = target.norm(dim=-1)
+    both_zero = (pred_norm == 0) & (target_norm == 0)
+    cosine = F.cosine_similarity(pred, target, dim=-1)
+    cosine = torch.where(both_zero, torch.ones_like(cosine), cosine)
+    return (1.0 - cosine).mean()
 
 
 def position_weighted_ce_loss(
@@ -112,6 +139,8 @@ def compute_drafter_loss(
     pred_hidden: torch.Tensor,
     target_hidden: torch.Tensor,
     *,
+    pred_latent: torch.Tensor | None = None,
+    target_latent: torch.Tensor | None = None,
     future_tokens: torch.Tensor | None = None,
     lm_head: LMHead | None = None,
     config: DrafterLossConfig | None = None,
@@ -131,6 +160,20 @@ def compute_drafter_loss(
         "hidden.cos": config.lambda_cos,
         "hidden.norm": config.lambda_norm,
     }
+
+    needs_latents = config.lambda_latent_mse != 0.0 or config.lambda_latent_cos != 0.0
+    if needs_latents:
+        if pred_latent is None or target_latent is None:
+            raise ValueError("pred_latent and target_latent are required when latent losses are enabled")
+        _validate_latent_shapes(pred_latent, target_latent)
+        components["latent.mse"] = latent_mse_loss(pred_latent, target_latent)
+        components["latent.cos"] = latent_cosine_loss(pred_latent, target_latent)
+        weights.update(
+            {
+                "latent.mse": config.lambda_latent_mse,
+                "latent.cos": config.lambda_latent_cos,
+            }
+        )
 
     needs_logits = (
         config.lambda_ce != 0.0

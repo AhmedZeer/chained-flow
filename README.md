@@ -19,7 +19,9 @@ loading the real model.
 - `generate_with_drafter`: Orthrus-style greedy speculative loop with timing and
   per-step acceptance stats.
 - `ARDrafter`: correctness/debug baseline.
-- `HiddenMLPDrafter`: first trainable hidden-state drafter baseline.
+- `HiddenMLPDrafter`: first trainable drafter baseline. When configured with a
+  VAE checkpoint it predicts future latent states, then decodes them back to LM
+  hidden states with the frozen VAE decoder.
 - `vae`: compact per-token hidden-state VAE architectures (`mlp`,
   `residual_mlp`, `low_rank`) behind a shared interface.
 - `training.losses`: combined hidden, logit/token, and verifier-surrogate
@@ -29,8 +31,18 @@ loading the real model.
 
 ## Training losses
 
-`training.losses.compute_drafter_loss` groups every term into one of three
+`training.losses.compute_drafter_loss` groups every term into four
 categories.
+
+### Latent losses
+
+These are used when a drafter owns a frozen VAE and predicts future latent
+states instead of raw hidden states.
+
+- `latent.mse`: mean squared error between predicted and VAE-encoded teacher
+  latents.
+- `latent.cos`: cosine distance between predicted and VAE-encoded teacher
+  latents.
 
 ### Hidden losses
 
@@ -64,6 +76,9 @@ L =
 + 0.2  * logit.ce
 + 0.1  * verifier.expected_accept
 ```
+
+VAE-backed drafters add latent losses only when `lambda_latent_mse` or
+`lambda_latent_cos` are nonzero. The VAE is frozen during drafter training.
 
 ## Teacher-state datasets
 
@@ -104,6 +119,14 @@ UV_CACHE_DIR=.uv-cache uv run python scripts/train_hidden_mlp.py \
   --windows_per_epoch 32 \
   --window_seed 0 \
   --local_files_only true
+```
+
+To train the drafter in VAE latent space, pass a trained VAE checkpoint:
+
+```yaml
+vae_dir: /path/to/hidden-vae-checkpoint
+lambda_latent_mse: 1.0
+lambda_latent_cos: 0.2
 ```
 
 The training script uses Hugging Face `Trainer` and `TrainingArguments`. It does
