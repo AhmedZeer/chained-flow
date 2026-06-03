@@ -6,7 +6,8 @@ source: gsm8k
 format_name: qwen_chat_qa
 limit: 1024
 generation_max_new_tokens: 4096
-batch_size: 8
+generation_batch_size: 64
+hidden_batch_size: 8
 storage_dtype: float16
 dtype: float16
 local_files_only: false
