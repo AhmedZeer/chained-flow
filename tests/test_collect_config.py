@@ -21,6 +21,7 @@ def test_smoke_gsm8k_collection_yaml_parses():
     assert args.device is None
     assert args.dtype == "float16"
     assert args.seed == 0
+    assert args.vllm_max_model_len == 8192
     assert args.output_dir == Path("teacher_states/gsm8k-qwen35-08b-smoke")
     assert args.tmp_output_dir == Path("teacher_states/_tmp_gsm8k-qwen35-08b-smoke")
     assert args.tmp_push_to_hub is None

@@ -8,7 +8,7 @@ from typing import Any, Iterable, Sequence as TypingSequence
 from datasets import Dataset, Features, Sequence, Value, load_dataset
 import torch
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from chained_flow.context import ChainedFlowContext
 from chained_flow.frozen_lm import DEFAULT_MODEL_ID
@@ -32,6 +32,7 @@ class TeacherCollectionConfig:
     device: str | None = None
     dtype: str | None = None
     seed: int = 0
+    vllm_max_model_len: int | None = None
     tmp_output_dir: str | None = None
     tmp_push_to_hub: str | None = None
     private: bool = False
@@ -132,10 +133,51 @@ def _load_vllm():
         from vllm import LLM, SamplingParams
     except ImportError as exc:
         raise ImportError(
-            "vLLM is required for teacher answer generation. Install vllm in the "
+            "vLLM is required for offline teacher answer generation. Install vllm in the "
             "collection environment before running collect_teacher_states.py."
         ) from exc
     return LLM, SamplingParams
+
+
+def _int_config_attr(config: Any, name: str) -> int | None:
+    value = getattr(config, name, None)
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _derive_num_attention_heads(config: Any) -> int | None:
+    for name in ("num_attention_heads", "n_head", "num_heads", "n_heads"):
+        value = _int_config_attr(config, name)
+        if value is not None:
+            return value
+
+    hidden_size = _int_config_attr(config, "hidden_size") or _int_config_attr(config, "n_embd")
+    head_dim = _int_config_attr(config, "head_dim") or _int_config_attr(config, "attention_head_size")
+    if hidden_size is not None and head_dim is not None and hidden_size % head_dim == 0:
+        return hidden_size // head_dim
+
+    return _int_config_attr(config, "num_key_value_heads")
+
+
+def _vllm_hf_overrides(model_id: str, *, local_files_only: bool) -> dict[str, int]:
+    hf_config = AutoConfig.from_pretrained(
+        model_id,
+        local_files_only=local_files_only,
+        trust_remote_code=True,
+    )
+    overrides: dict[str, int] = {}
+    if not hasattr(hf_config, "num_attention_heads"):
+        num_attention_heads = _derive_num_attention_heads(hf_config)
+        if num_attention_heads is not None:
+            overrides["num_attention_heads"] = num_attention_heads
+    return overrides
+
+
+def _signature_accepts(parameters: Iterable[inspect.Parameter], name: str) -> bool:
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters) or any(
+        param.name == name for param in parameters
+    )
 
 
 def _trim_generated_ids(
@@ -280,13 +322,25 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
         batches = list(_batched(_iter_limited(raw_dataset, config.limit), config.batch_size))
         print(f"loading vLLM generation model: {config.model_id}", flush=True)
         LLM, SamplingParams = _load_vllm()
+        llm_signature = inspect.signature(LLM).parameters
         llm_kwargs: dict[str, Any] = {
             "model": config.model_id,
             "tokenizer": config.model_id,
             "dtype": config.dtype or "auto",
             "trust_remote_code": True,
         }
-        if "seed" in inspect.signature(LLM).parameters:
+        hf_overrides = _vllm_hf_overrides(config.model_id, local_files_only=config.local_files_only)
+        if hf_overrides and _signature_accepts(llm_signature.values(), "hf_overrides"):
+            print(f"using vLLM HF config overrides: {hf_overrides}", flush=True)
+            llm_kwargs["hf_overrides"] = hf_overrides
+        elif hf_overrides:
+            print(
+                f"vLLM HF config overrides unavailable in this vLLM version: {hf_overrides}",
+                flush=True,
+            )
+        if config.vllm_max_model_len is not None and _signature_accepts(llm_signature.values(), "max_model_len"):
+            llm_kwargs["max_model_len"] = config.vllm_max_model_len
+        if _signature_accepts(llm_signature.values(), "seed"):
             llm_kwargs["seed"] = config.seed
         with timed_section(timings, "generation_model_load"):
             llm = LLM(**llm_kwargs)

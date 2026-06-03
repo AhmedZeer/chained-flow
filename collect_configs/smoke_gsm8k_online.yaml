@@ -6,6 +6,7 @@ source: gsm8k
 format_name: qwen_chat_qa
 limit: 5
 generation_max_new_tokens: 4096
+vllm_max_model_len: 8192
 batch_size: 256
 storage_dtype: float32
 local_files_only: false
