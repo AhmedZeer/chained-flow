@@ -3,6 +3,7 @@ answer_dataset_path: sghosts/_tmp_cf_gsm8k_64_train_v1
 answer_dataset_split: train
 limit: 64
 batch_size: 8
+hidden_batch_size: 8
 storage_dtype: float16
 dtype: float16
 local_files_only: false

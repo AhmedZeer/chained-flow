@@ -25,6 +25,8 @@ class TeacherCollectionConfig:
     max_tokens: int | None = None
     generation_max_new_tokens: int = 256
     batch_size: int = 1
+    generation_batch_size: int | None = None
+    hidden_batch_size: int | None = None
     storage_dtype: str = "float32"
     local_files_only: bool = False
     device: str | None = None
@@ -145,6 +147,14 @@ def _batched(items: Iterable[tuple[int, dict[str, Any]]], batch_size: int) -> It
             batch = []
     if batch:
         yield batch
+
+
+def _effective_generation_batch_size(config: TeacherCollectionConfig) -> int:
+    return config.generation_batch_size or config.batch_size
+
+
+def _effective_hidden_batch_size(config: TeacherCollectionConfig) -> int:
+    return config.hidden_batch_size or config.batch_size
 
 
 def _ensure_padding(tokenizer: Any, eos_token_id: int | None) -> int:
@@ -301,7 +311,8 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
             print(f"dataset loaded: rows={len(raw_dataset)}", flush=True)
 
             total = min(config.limit, len(raw_dataset)) if config.limit is not None else len(raw_dataset)
-            batches = list(_batched(_iter_limited(raw_dataset, config.limit), config.batch_size))
+            generation_batch_size = _effective_generation_batch_size(config)
+            batches = list(_batched(_iter_limited(raw_dataset, config.limit), generation_batch_size))
             generation_bar = tqdm(total=total, desc="phase 1/2 generating answers")
             with timed_section(timings, "teacher_generation", wrapper.device):
                 for batch in batches:
@@ -370,7 +381,8 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
         rows: list[dict[str, Any]] = []
         hidden_bar = tqdm(total=len(answer_rows), desc="phase 2/2 extracting hidden states")
         with timed_section(timings, "teacher_hidden_extraction", wrapper.device):
-            for batch in _batched(list(enumerate(answer_rows)), config.batch_size):
+            hidden_batch_size = _effective_hidden_batch_size(config)
+            for batch in _batched(list(enumerate(answer_rows)), hidden_batch_size):
                 batch_rows = [row for _, row in batch]
                 sequences = [
                     torch.tensor(row["input_ids"], dtype=torch.long, device=wrapper.device)

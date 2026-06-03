@@ -26,3 +26,11 @@ def test_smoke_gsm8k_collection_yaml_parses():
     assert args.tmp_push_to_hub is None
     assert args.answer_dataset_path is None
     assert args.answer_dataset_split is None
+
+
+def test_64_gsm8k_collection_yaml_parses_split_batch_sizes():
+    module = load_script_module()
+    args = module.load_yaml_args(Path("collect_configs/64_train_gsm8k.yaml"))
+    assert args.batch_size == 64
+    assert args.generation_batch_size == 64
+    assert args.hidden_batch_size == 8

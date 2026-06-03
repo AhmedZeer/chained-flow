@@ -1,8 +1,11 @@
 import torch
 
 from chained_flow.training.collect_teacher import (
+    TeacherCollectionConfig,
     _answer_row_from_dataset_row,
     _backbone,
+    _effective_generation_batch_size,
+    _effective_hidden_batch_size,
     _model_torch_dtype,
     _sequence_spans,
     format_gsm8k_prompt,
@@ -46,6 +49,16 @@ def test_answer_row_from_dataset_row_updates_hidden_dtype():
     assert row["input_ids"] == [1, 2]
     assert row["hidden_dtype"] == "float16"
     assert row["num_tokens"] == 2
+
+
+def test_effective_batch_sizes_fallback_to_batch_size():
+    config = TeacherCollectionConfig(batch_size=16)
+    assert _effective_generation_batch_size(config) == 16
+    assert _effective_hidden_batch_size(config) == 16
+
+    config = TeacherCollectionConfig(batch_size=16, generation_batch_size=32, hidden_batch_size=4)
+    assert _effective_generation_batch_size(config) == 32
+    assert _effective_hidden_batch_size(config) == 4
 
 
 def test_gsm8k_format_uses_prompt_only_without_reference_answer(fake_wrapper):

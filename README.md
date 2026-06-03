@@ -130,6 +130,8 @@ come from CLI args or a YAML config, not `.env`.
 
 Collection first writes/pushes a temporary answer-only dataset using a `_tmp`
 prefix, then runs hidden-state extraction and writes the final dataset.
+Use `generation_batch_size` and `hidden_batch_size` in YAML configs to tune the
+two phases separately; `batch_size` remains the fallback for both.
 
 To skip generation and extract hidden states from a previously saved `_tmp`
 answer dataset:

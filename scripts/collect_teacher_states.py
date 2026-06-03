@@ -46,6 +46,8 @@ def load_yaml_args(path: Path) -> argparse.Namespace:
         max_tokens=data.get("max_tokens"),
         generation_max_new_tokens=data.get("generation_max_new_tokens", 4096),
         batch_size=data.get("batch_size", 1),
+        generation_batch_size=data.get("generation_batch_size"),
+        hidden_batch_size=data.get("hidden_batch_size"),
         storage_dtype=data.get("storage_dtype", "float32"),
         local_files_only=bool(data.get("local_files_only", False)),
         device=data.get("device"),
@@ -76,6 +78,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--generation-max-new-tokens", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--generation-batch-size", type=int, default=None)
+    parser.add_argument("--hidden-batch-size", type=int, default=None)
     parser.add_argument(
         "--storage-dtype",
         choices=["float32", "float16"],
@@ -119,6 +123,8 @@ def main() -> None:
         max_tokens=args.max_tokens,
         generation_max_new_tokens=args.generation_max_new_tokens,
         batch_size=args.batch_size,
+        generation_batch_size=args.generation_batch_size,
+        hidden_batch_size=args.hidden_batch_size,
         storage_dtype=args.storage_dtype,
         local_files_only=args.local_files_only,
         device=args.device,
