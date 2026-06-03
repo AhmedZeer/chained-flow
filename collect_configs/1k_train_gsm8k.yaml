@@ -6,9 +6,11 @@ source: gsm8k
 format_name: qwen_chat_qa
 limit: 1024
 generation_max_new_tokens: 4096
-batch_size: 1024
-storage_dtype: float32
+batch_size: 8
+storage_dtype: float16
+dtype: float16
 local_files_only: false
 output_dir: teacher_states/gsm8k-qwen35-08b-1k-train
 push_to_hub: sghosts/cf_gsm8k_1k_train
 private: false
+device: cuda
