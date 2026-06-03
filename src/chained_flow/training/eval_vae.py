@@ -12,7 +12,11 @@ from torch.utils.data import DataLoader
 from chained_flow.frozen_lm import DEFAULT_MODEL_ID, FrozenLMWrapper
 from chained_flow.training.train_vae import HiddenVAETrainingModule, VAELossArguments, VAEModelArguments
 from chained_flow.training.vae_dataset import HiddenTokenTensorDataset, TeacherHiddenTokenDataset, collate_hidden_tokens
-from chained_flow.training.vae_losses import compute_hidden_vae_loss
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - tqdm is normally present through datasets/transformers.
+    tqdm = None
 
 
 @dataclass
@@ -63,6 +67,37 @@ def logit_kl_divergence(
     return F.kl_div(recon_log_probs, real_probs, reduction="batchmean") * (temperature**2)
 
 
+def per_token_logit_kl_divergence(
+    real_logits: torch.Tensor,
+    recon_logits: torch.Tensor,
+    *,
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    if real_logits.shape != recon_logits.shape:
+        raise ValueError(
+            f"real_logits and recon_logits must have the same shape, got "
+            f"{tuple(real_logits.shape)} and {tuple(recon_logits.shape)}"
+        )
+    real_probs = F.softmax(real_logits.float() / temperature, dim=-1)
+    recon_log_probs = F.log_softmax(recon_logits.float() / temperature, dim=-1)
+    real_log_probs = real_probs.clamp_min(1e-12).log()
+    return (real_probs * (real_log_probs - recon_log_probs)).sum(dim=-1) * (temperature**2)
+
+
+def summarize_metric(values: torch.Tensor) -> dict[str, float]:
+    values = values.float()
+    return {
+        "mean": float(values.mean().item()),
+        "std": float(values.std(unbiased=False).item()) if values.numel() > 1 else 0.0,
+        "min": float(values.min().item()),
+        "max": float(values.max().item()),
+        "p50": float(torch.quantile(values, 0.50).item()),
+        "p90": float(torch.quantile(values, 0.90).item()),
+        "p95": float(torch.quantile(values, 0.95).item()),
+        "p99": float(torch.quantile(values, 0.99).item()),
+    }
+
+
 def load_vae_training_module(vae_dir: str | Path, *, device: torch.device) -> HiddenVAETrainingModule:
     vae_dir = Path(vae_dir)
     config_path = vae_dir / "chained_flow_vae_config.json"
@@ -92,8 +127,43 @@ def load_vae_training_module(vae_dir: str | Path, *, device: torch.device) -> Hi
     return module
 
 
-def _mean_metrics(total_metrics: dict[str, float], total_examples: int) -> dict[str, float]:
-    return {name: value / max(1, total_examples) for name, value in total_metrics.items()}
+def per_token_vae_metrics(
+    recon_hidden: torch.Tensor,
+    target_hidden: torch.Tensor,
+    *,
+    mu: torch.Tensor,
+    logvar: torch.Tensor,
+    real_logits: torch.Tensor,
+    recon_logits: torch.Tensor,
+    free_bits: float = 0.0,
+) -> dict[str, torch.Tensor]:
+    if recon_hidden.shape != target_hidden.shape:
+        raise ValueError(
+            f"recon_hidden and target_hidden must have identical shape, got "
+            f"{tuple(recon_hidden.shape)} and {tuple(target_hidden.shape)}"
+        )
+    hidden_mse = F.mse_loss(recon_hidden, target_hidden, reduction="none").mean(dim=-1)
+    recon_norm = recon_hidden.norm(dim=-1)
+    target_norm = target_hidden.norm(dim=-1)
+    both_zero = (recon_norm == 0) & (target_norm == 0)
+    cosine = F.cosine_similarity(recon_hidden, target_hidden, dim=-1)
+    cosine = torch.where(both_zero, torch.ones_like(cosine), cosine)
+    hidden_cos = 1.0 - cosine
+    hidden_norm = (recon_norm - target_norm).pow(2)
+    latent_kl = -0.5 * (1.0 + logvar - mu.pow(2) - logvar.exp())
+    if free_bits > 0.0:
+        latent_kl = latent_kl.clamp_min(free_bits)
+    latent_kl = latent_kl.sum(dim=-1)
+    logit_kl = per_token_logit_kl_divergence(real_logits, recon_logits)
+    token_match = (real_logits.argmax(dim=-1) == recon_logits.argmax(dim=-1)).float()
+    return {
+        "hidden.mse": hidden_mse,
+        "hidden.cos": hidden_cos,
+        "hidden.norm": hidden_norm,
+        "latent.kl": latent_kl,
+        "logit.kl": logit_kl,
+        "token.match": token_match,
+    }
 
 
 @torch.inference_mode()
@@ -128,33 +198,40 @@ def evaluate_vae(args: VAEEvalArguments) -> dict[str, Any]:
     print(f"LM head loaded: device={next(lm_head.parameters()).device}", flush=True)
     lm_head_dtype = next(lm_head.parameters()).dtype
 
-    totals: dict[str, float] = {}
+    metric_values: dict[str, list[torch.Tensor]] = {}
     total_examples = 0
-    for step, batch in enumerate(dataloader):
+    total_batches = len(dataloader)
+    if args.max_batches is not None:
+        total_batches = min(total_batches, args.max_batches)
+    iterator = enumerate(dataloader)
+    progress = None
+    if tqdm is not None:
+        progress = tqdm(iterator, total=total_batches, desc="evaluating VAE", unit="batch")
+        iterator = progress
+    for step, batch in iterator:
         if args.max_batches is not None and step >= args.max_batches:
             break
         hidden = batch["hidden"].to(device)
         output = vae_module.vae(hidden)
-        loss_output = compute_hidden_vae_loss(
+        real_logits = lm_head(hidden.to(dtype=lm_head_dtype))
+        recon_logits = lm_head(output.recon_hidden.to(dtype=lm_head_dtype))
+        batch_metrics = per_token_vae_metrics(
             output.recon_hidden,
             hidden,
             mu=output.mu,
             logvar=output.logvar,
-            config=vae_module.loss_config,
+            real_logits=real_logits,
+            recon_logits=recon_logits,
+            free_bits=vae_module.loss_config.free_bits,
         )
-        real_logits = lm_head(hidden.to(dtype=lm_head_dtype))
-        recon_logits = lm_head(output.recon_hidden.to(dtype=lm_head_dtype))
-        batch_metrics = {
-            **{name: value for name, value in loss_output.components.items()},
-            "logit.kl": logit_kl_divergence(real_logits, recon_logits),
-            "token.match": (real_logits.argmax(dim=-1) == recon_logits.argmax(dim=-1)).float().mean(),
-        }
         batch_size = int(hidden.shape[0])
         total_examples += batch_size
+        if progress is not None:
+            progress.set_postfix(tokens=total_examples)
         for name, value in batch_metrics.items():
-            totals[name] = totals.get(name, 0.0) + float(value.detach().cpu()) * batch_size
+            metric_values.setdefault(name, []).append(value.detach().cpu())
 
-    metrics = _mean_metrics(totals, total_examples)
+    metrics = {name: summarize_metric(torch.cat(values, dim=0)) for name, values in metric_values.items()}
     result = {
         "vae_dir": args.vae_dir,
         "dataset_path": args.dataset_path,
@@ -178,5 +255,8 @@ __all__ = [
     "evaluate_vae",
     "load_vae_training_module",
     "logit_kl_divergence",
+    "per_token_logit_kl_divergence",
+    "per_token_vae_metrics",
+    "summarize_metric",
     "torch_dtype_from_string",
 ]
