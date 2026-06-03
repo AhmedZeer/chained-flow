@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import random
-from typing import Any
 
 from datasets import Dataset, load_dataset, load_from_disk
 import torch
@@ -28,7 +27,6 @@ class TeacherHiddenTokenDataset(TorchDataset):
         self.seed = seed
         self.response_only = response_only
         self.valid_rows: list[tuple[int, int, int]] = []
-        total_tokens = 0
         lengths = dataset["num_tokens"]
         prompt_lengths = dataset["prompt_length"] if response_only and "prompt_length" in dataset.column_names else None
         for row_idx, length_value in enumerate(lengths):
@@ -37,10 +35,10 @@ class TeacherHiddenTokenDataset(TorchDataset):
             end = length
             if end > start:
                 self.valid_rows.append((row_idx, start, end))
-                total_tokens += end - start
         if not self.valid_rows:
             raise ValueError("dataset contains no hidden-token rows for VAE training")
-        self.tokens_per_epoch = tokens_per_epoch or total_tokens
+        self.hidden_tokens = self._flatten_hidden_tokens(dataset)
+        self.tokens_per_epoch = tokens_per_epoch or int(self.hidden_tokens.shape[0])
 
     @classmethod
     def from_path(
@@ -79,15 +77,22 @@ class TeacherHiddenTokenDataset(TorchDataset):
     def __len__(self) -> int:
         return self.tokens_per_epoch
 
-    def _sample_row_and_position(self, index: int) -> tuple[dict[str, Any], int]:
+    def _flatten_hidden_tokens(self, dataset: Dataset) -> torch.Tensor:
+        chunks: list[torch.Tensor] = []
+        hidden_column = dataset["final_hidden"]
+        for row_idx, start, end in self.valid_rows:
+            hidden = torch.as_tensor(hidden_column[row_idx][start:end], dtype=torch.float32)
+            if hidden.ndim != 2:
+                raise ValueError(f"final_hidden row {row_idx} must have shape [tokens, hidden_size]")
+            chunks.append(hidden)
+        return torch.cat(chunks, dim=0).contiguous()
+
+    def _sample_token_index(self, index: int) -> int:
         rng = random.Random(self.seed + index)
-        row_idx, start, end = rng.choice(self.valid_rows)
-        return self.dataset[int(row_idx)], rng.randrange(start, end)
+        return rng.randrange(int(self.hidden_tokens.shape[0]))
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        row, position = self._sample_row_and_position(index)
-        hidden = torch.tensor(row["final_hidden"][position], dtype=torch.float32)
-        return {"hidden": hidden}
+        return {"hidden": self.hidden_tokens[self._sample_token_index(index)]}
 
 
 def collate_hidden_tokens(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
