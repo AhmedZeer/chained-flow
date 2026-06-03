@@ -8,6 +8,11 @@ from datasets import Dataset, load_dataset, load_from_disk
 import torch
 from torch.utils.data import Dataset as TorchDataset
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - tqdm is normally present through datasets/transformers.
+    tqdm = None
+
 
 @dataclass(frozen=True)
 class TeacherHiddenToken:
@@ -59,9 +64,18 @@ class TeacherHiddenTokenDataset(TorchDataset):
         self.response_only = response_only
         self.requested_tokens_per_epoch = tokens_per_epoch
         self.valid_rows: list[tuple[int, int, int]] = []
+        print("formatting VAE dataset: scanning hidden-token rows", flush=True)
         lengths = dataset["num_tokens"]
         prompt_lengths = dataset["prompt_length"] if response_only and "prompt_length" in dataset.column_names else None
-        for row_idx, length_value in enumerate(lengths):
+        iterator = enumerate(lengths)
+        if tqdm is not None:
+            iterator = tqdm(
+                iterator,
+                total=len(lengths),
+                desc="scanning VAE rows",
+                unit="row",
+            )
+        for row_idx, length_value in iterator:
             length = int(length_value)
             start = int(prompt_lengths[row_idx]) if prompt_lengths is not None else 0
             end = length
@@ -70,6 +84,11 @@ class TeacherHiddenTokenDataset(TorchDataset):
         if not self.valid_rows:
             raise ValueError("dataset contains no hidden-token rows for VAE training")
         self.hidden_tokens = self._flatten_hidden_tokens(dataset)
+        print(
+            f"VAE dataset formatted: hidden_tokens={self.hidden_tokens.shape[0]} "
+            f"hidden_size={self.hidden_tokens.shape[1]}",
+            flush=True,
+        )
         self.tokens_per_epoch = tokens_per_epoch or int(self.hidden_tokens.shape[0])
 
     @classmethod
@@ -112,7 +131,15 @@ class TeacherHiddenTokenDataset(TorchDataset):
     def _flatten_hidden_tokens(self, dataset: Dataset) -> torch.Tensor:
         chunks: list[torch.Tensor] = []
         hidden_column = dataset["final_hidden"]
-        for row_idx, start, end in self.valid_rows:
+        iterator = self.valid_rows
+        if tqdm is not None:
+            iterator = tqdm(
+                iterator,
+                total=len(self.valid_rows),
+                desc="flattening VAE hidden states",
+                unit="row",
+            )
+        for row_idx, start, end in iterator:
             hidden = torch.as_tensor(hidden_column[row_idx][start:end], dtype=torch.float32)
             if hidden.ndim != 2:
                 raise ValueError(f"final_hidden row {row_idx} must have shape [tokens, hidden_size]")

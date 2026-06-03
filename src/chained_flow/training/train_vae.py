@@ -100,6 +100,13 @@ class VAEComponentLoggingTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
+def configure_epoch_eval(training_args: TrainingArguments) -> TrainingArguments:
+    training_args.eval_strategy = IntervalStrategy.EPOCH
+    training_args.save_strategy = SaveStrategy.EPOCH
+    training_args.do_eval = True
+    return training_args
+
+
 def train_vae_with_trainer(
     model_args: VAEModelArguments,
     data_args: VAEDataArguments,
@@ -146,8 +153,14 @@ def train_vae_with_trainer(
     model_device = next(model.parameters()).device
     print(f"VAE model device: {model_device}", flush=True)
     print(f"initializing VAE trainer: output_dir={training_args.output_dir}", flush=True)
-    training_args.eval_strategy = IntervalStrategy.EPOCH
-    training_args.save_strategy = SaveStrategy.EPOCH
+    configure_epoch_eval(training_args)
+    print(
+        f"VAE trainer strategies: eval_strategy={training_args.eval_strategy} "
+        f"save_strategy={training_args.save_strategy} do_eval={training_args.do_eval} "
+        f"train_batch_size={training_args.per_device_train_batch_size} "
+        f"eval_batch_size={training_args.per_device_eval_batch_size}",
+        flush=True,
+    )
     trainer = VAEComponentLoggingTrainer(
         model=model,
         args=training_args,

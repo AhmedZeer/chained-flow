@@ -12,6 +12,7 @@ from chained_flow.training.train_vae import (
     VAEDataArguments,
     VAELossArguments,
     VAEModelArguments,
+    configure_epoch_eval,
     train_vae_with_trainer,
 )
 

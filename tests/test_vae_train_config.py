@@ -2,6 +2,7 @@ from pathlib import Path
 import importlib.util
 
 from transformers import HfArgumentParser, TrainingArguments
+from transformers.trainer_utils import IntervalStrategy, SaveStrategy
 
 
 def load_script_module():
@@ -37,6 +38,18 @@ def test_smoke_vae_yaml_parses():
     assert data_args.validation_fraction == 0.1
     assert loss_args.beta == 0.0001
     assert training_args.output_dir == "/content/drive/MyDrive/chained-flow/vae/ckpts/hidden-vae-smoke"
-    assert training_args.per_device_eval_batch_size == 64
+    assert training_args.per_device_eval_batch_size == training_args.per_device_train_batch_size
+    assert training_args.per_device_eval_batch_size > 0
     assert training_args.eval_strategy == "epoch"
     assert training_args.save_strategy == "epoch"
+
+
+def test_configure_epoch_eval_forces_eval_when_args_default_to_no_eval():
+    module = load_script_module()
+    training_args = TrainingArguments(output_dir="/tmp/chained-flow-test")
+
+    module.configure_epoch_eval(training_args)
+
+    assert training_args.eval_strategy == IntervalStrategy.EPOCH
+    assert training_args.save_strategy == SaveStrategy.EPOCH
+    assert training_args.do_eval is True
