@@ -1,4 +1,5 @@
 dataset_path: sghosts/cf_gsm8k_64_train_v1
+dataset_split: train
 output_dir: vae_checkpoints/hidden-vae-smoke
 
 vae_type: residual_mlp

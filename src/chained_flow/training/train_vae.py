@@ -25,6 +25,7 @@ class VAEModelArguments:
 @dataclass
 class VAEDataArguments:
     dataset_path: str = "teacher_states/gsm8k-qwen35-08b-smoke"
+    dataset_split: str = "train"
     tokens_per_epoch: int | None = None
     token_seed: int = 0
     response_only: bool = True
@@ -102,8 +103,9 @@ def train_vae_with_trainer(
     training_args: TrainingArguments,
 ) -> dict[str, Any]:
     torch.manual_seed(training_args.seed)
-    dataset = TeacherHiddenTokenDataset.from_disk(
+    dataset = TeacherHiddenTokenDataset.from_path(
         data_args.dataset_path,
+        split=data_args.dataset_split,
         tokens_per_epoch=data_args.tokens_per_epoch,
         seed=data_args.token_seed,
         response_only=data_args.response_only,

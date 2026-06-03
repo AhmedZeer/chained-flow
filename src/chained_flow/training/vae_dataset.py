@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import random
 from typing import Any
 
-from datasets import Dataset, load_from_disk
+from datasets import Dataset, load_dataset, load_from_disk
 import torch
 from torch.utils.data import Dataset as TorchDataset
 
@@ -40,6 +41,24 @@ class TeacherHiddenTokenDataset(TorchDataset):
         self.tokens_per_epoch = tokens_per_epoch or total_tokens
 
     @classmethod
+    def from_path(
+        cls,
+        path: str,
+        *,
+        split: str = "train",
+        tokens_per_epoch: int | None = None,
+        seed: int = 0,
+        response_only: bool = True,
+    ) -> "TeacherHiddenTokenDataset":
+        dataset = load_from_disk(path) if Path(path).exists() else load_dataset(path, split=split)
+        return cls(
+            dataset,
+            tokens_per_epoch=tokens_per_epoch,
+            seed=seed,
+            response_only=response_only,
+        )
+
+    @classmethod
     def from_disk(
         cls,
         path: str,
@@ -48,8 +67,8 @@ class TeacherHiddenTokenDataset(TorchDataset):
         seed: int = 0,
         response_only: bool = True,
     ) -> "TeacherHiddenTokenDataset":
-        return cls(
-            load_from_disk(path),
+        return cls.from_path(
+            path,
             tokens_per_epoch=tokens_per_epoch,
             seed=seed,
             response_only=response_only,
