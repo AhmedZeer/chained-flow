@@ -20,6 +20,8 @@ loading the real model.
   per-step acceptance stats.
 - `ARDrafter`: correctness/debug baseline.
 - `HiddenMLPDrafter`: first trainable hidden-state drafter baseline.
+- `vae`: compact per-token hidden-state VAE architectures (`mlp`,
+  `residual_mlp`, `low_rank`) behind a shared interface.
 - `training.losses`: combined hidden, logit/token, and verifier-surrogate
   losses for hidden-state drafter training.
 - `data.windows`: token window helpers with explicit teacher hidden-state
@@ -112,6 +114,12 @@ Smoke YAML config example:
 
 ```bash
 UV_CACHE_DIR=.uv-cache uv run python scripts/train_hidden_mlp.py train_configs/smoke_mlp.yaml
+```
+
+Hidden VAE smoke training:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run python scripts/train_vae.py train_configs/smoke_vae.yaml
 ```
 
 GSM8K collection is prompt-only: the script asks the frozen model to generate
