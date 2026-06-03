@@ -7,11 +7,14 @@ from chained_flow.training.collect_teacher import (
     _effective_generation_batch_size,
     _effective_hidden_batch_size,
     _model_torch_dtype,
+    _push_teacher_dataset_if_requested,
     _resolve_range,
     _sequence_spans,
     format_gsm8k_prompt,
     teacher_dataset_features,
 )
+from chained_flow.timing import TimingStats
+from datasets import Dataset
 
 
 def test_teacher_features_text_first_and_no_attention_mask():
@@ -114,3 +117,22 @@ def test_backbone_prefers_model_attr(fake_wrapper):
 
     model = ModelWithBackbone()
     assert _backbone(model) is model.model
+
+
+def test_push_teacher_dataset_if_requested_calls_push_to_hub(monkeypatch):
+    dataset = Dataset.from_list([{"x": 1}])
+    calls = {}
+
+    def fake_push_to_hub(repo_id, *, private):
+        calls["repo_id"] = repo_id
+        calls["private"] = private
+
+    monkeypatch.setattr(dataset, "push_to_hub", fake_push_to_hub)
+    _push_teacher_dataset_if_requested(
+        dataset,
+        TeacherCollectionConfig(push_to_hub="user/repo", private=True),
+        TimingStats(),
+        torch.device("cpu"),
+    )
+
+    assert calls == {"repo_id": "user/repo", "private": True}

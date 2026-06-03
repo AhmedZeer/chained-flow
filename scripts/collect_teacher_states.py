@@ -138,6 +138,7 @@ def main() -> None:
         seed=args.seed,
         tmp_output_dir=str(args.tmp_output_dir) if args.tmp_output_dir else None,
         tmp_push_to_hub=args.tmp_push_to_hub,
+        push_to_hub=args.push_to_hub,
         answer_dataset_path=args.answer_dataset_path,
         answer_dataset_split=args.answer_dataset_split,
         private=args.private,
@@ -145,8 +146,6 @@ def main() -> None:
     dataset, timings = collect_teacher_dataset(config)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     dataset.save_to_disk(str(args.output_dir))
-    if args.push_to_hub:
-        dataset.push_to_hub(args.push_to_hub, private=args.private)
 
     print(f"saved={args.output_dir}")
     print(f"rows={len(dataset)}")

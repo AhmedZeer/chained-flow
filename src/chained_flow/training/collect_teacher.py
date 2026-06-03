@@ -36,6 +36,7 @@ class TeacherCollectionConfig:
     seed: int = 0
     tmp_output_dir: str | None = None
     tmp_push_to_hub: str | None = None
+    push_to_hub: str | None = None
     answer_dataset_path: str | None = None
     answer_dataset_split: str | None = None
     private: bool = False
@@ -278,6 +279,18 @@ def _ranged_answer_rows(
     ]
 
 
+def _push_teacher_dataset_if_requested(
+    dataset: Dataset,
+    config: TeacherCollectionConfig,
+    timings: TimingStats,
+    device: torch.device,
+) -> None:
+    if config.push_to_hub:
+        print(f"pushing teacher dataset: {config.push_to_hub}", flush=True)
+        with timed_section(timings, "dataset_push_to_hub", device):
+            dataset.push_to_hub(config.push_to_hub, private=config.private)
+
+
 @torch.inference_mode()
 def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, TimingStats]:
     torch.manual_seed(config.seed)
@@ -450,4 +463,5 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
 
     with timed_section(timings, "dataset_build"):
         dataset = Dataset.from_list(rows, features=teacher_dataset_features(config.storage_dtype))
+    _push_teacher_dataset_if_requested(dataset, config, timings, wrapper.device)
     return dataset, timings

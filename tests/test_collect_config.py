@@ -26,6 +26,7 @@ def test_smoke_gsm8k_collection_yaml_parses():
     assert args.output_dir == Path("teacher_states/gsm8k-qwen35-08b-smoke")
     assert args.tmp_output_dir == Path("teacher_states/_tmp_gsm8k-qwen35-08b-smoke")
     assert args.tmp_push_to_hub is None
+    assert args.push_to_hub is None
     assert args.answer_dataset_path is None
     assert args.answer_dataset_split is None
 
@@ -39,3 +40,11 @@ def test_64_gsm8k_collection_yaml_parses_split_batch_sizes():
     assert args.batch_size == 64
     assert args.generation_batch_size == 64
     assert args.hidden_batch_size == 8
+
+
+def test_resume_collection_yaml_keeps_final_push_target():
+    module = load_script_module()
+    args = module.load_yaml_args(Path("collect_configs/64_train_gsm8k_resume.yaml"))
+
+    assert args.answer_dataset_path == "sghosts/_tmp_cf_gsm8k_64_train_v1"
+    assert args.push_to_hub == "sghosts/cf_gsm8k_64_train_v1"
