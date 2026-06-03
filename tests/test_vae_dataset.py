@@ -22,6 +22,20 @@ def test_teacher_hidden_token_dataset_samples_response_tokens():
     assert item["hidden"][0].item() in {1.0, 2.0}
 
 
+def test_teacher_hidden_token_dataset_init_uses_metadata_columns_only():
+    dataset = Dataset.from_dict(
+        {
+            "final_hidden": [[[0.0, 0.0], [1.0, 1.0]]],
+            "num_tokens": [2],
+            "prompt_length": [1],
+        }
+    )
+    dataset = dataset.remove_columns("final_hidden")
+    token_dataset = TeacherHiddenTokenDataset(dataset, tokens_per_epoch=1, seed=0, response_only=True)
+
+    assert token_dataset.valid_rows == [(0, 1, 2)]
+
+
 def test_collate_hidden_tokens_stacks_batch():
     batch = [{"hidden": torch.zeros(2)}, {"hidden": torch.ones(2)}]
     collated = collate_hidden_tokens(batch)

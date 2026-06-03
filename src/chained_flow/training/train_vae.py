@@ -128,6 +128,8 @@ def train_vae_with_trainer(
     model = HiddenVAETrainingModule(model_args, loss_args)
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     print(f"VAE model initialized: parameters={parameter_count}", flush=True)
+    model_device = next(model.parameters()).device
+    print(f"VAE model device: {model_device}", flush=True)
     print(f"initializing VAE trainer: output_dir={training_args.output_dir}", flush=True)
     trainer = VAEComponentLoggingTrainer(
         model=model,

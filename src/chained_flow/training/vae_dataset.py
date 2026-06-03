@@ -29,9 +29,11 @@ class TeacherHiddenTokenDataset(TorchDataset):
         self.response_only = response_only
         self.valid_rows: list[tuple[int, int, int]] = []
         total_tokens = 0
-        for row_idx, row in enumerate(dataset):
-            length = int(row["num_tokens"])
-            start = int(row.get("prompt_length", 0)) if response_only else 0
+        lengths = dataset["num_tokens"]
+        prompt_lengths = dataset["prompt_length"] if response_only and "prompt_length" in dataset.column_names else None
+        for row_idx, length_value in enumerate(lengths):
+            length = int(length_value)
+            start = int(prompt_lengths[row_idx]) if prompt_lengths is not None else 0
             end = length
             if end > start:
                 self.valid_rows.append((row_idx, start, end))
