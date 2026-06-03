@@ -160,6 +160,19 @@ def _derive_num_attention_heads(config: Any) -> int | None:
     return _int_config_attr(config, "num_key_value_heads")
 
 
+def _derived_num_attention_heads_property(config: Any) -> int:
+    hidden_size = _int_config_attr(config, "hidden_size") or _int_config_attr(config, "n_embd")
+    head_dim = _int_config_attr(config, "head_dim") or _int_config_attr(config, "attention_head_size")
+    if hidden_size is not None and head_dim is not None and hidden_size % head_dim == 0:
+        return hidden_size // head_dim
+
+    num_key_value_heads = _int_config_attr(config, "num_key_value_heads")
+    if num_key_value_heads is not None:
+        return num_key_value_heads
+
+    raise AttributeError("num_attention_heads")
+
+
 def _vllm_hf_overrides(model_id: str, *, local_files_only: bool) -> dict[str, int]:
     hf_config = AutoConfig.from_pretrained(
         model_id,
@@ -171,6 +184,7 @@ def _vllm_hf_overrides(model_id: str, *, local_files_only: bool) -> dict[str, in
         num_attention_heads = _derive_num_attention_heads(hf_config)
         if num_attention_heads is not None:
             overrides["num_attention_heads"] = num_attention_heads
+            setattr(type(hf_config), "num_attention_heads", property(_derived_num_attention_heads_property))
     return overrides
 
 

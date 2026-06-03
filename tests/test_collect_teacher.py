@@ -3,6 +3,7 @@ import torch
 from chained_flow.training.collect_teacher import (
     _backbone,
     _derive_num_attention_heads,
+    _derived_num_attention_heads_property,
     _model_torch_dtype,
     _sequence_spans,
     format_gsm8k_prompt,
@@ -69,6 +70,16 @@ def test_derives_attention_heads_from_hidden_size_and_head_dim():
         head_dim = 64
 
     assert _derive_num_attention_heads(Config()) == 16
+
+
+def test_patched_attention_heads_property_works_on_new_instances():
+    class Config:
+        hidden_size = 1024
+        head_dim = 64
+
+    Config.num_attention_heads = property(_derived_num_attention_heads_property)
+
+    assert Config().num_attention_heads == 16
 
 
 def test_backbone_prefers_model_attr(fake_wrapper):
