@@ -13,5 +13,7 @@ device:
 dtype:
 seed: 0
 output_dir: teacher_states/gsm8k-qwen35-08b-smoke
+tmp_output_dir: teacher_states/_tmp_gsm8k-qwen35-08b-smoke
 push_to_hub:
+tmp_push_to_hub:
 private: false

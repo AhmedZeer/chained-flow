@@ -16,6 +16,19 @@ from chained_flow.frozen_lm import DEFAULT_MODEL_ID
 from chained_flow.training.collect_teacher import TeacherCollectionConfig, collect_teacher_dataset
 
 
+def tmp_output_dir(output_dir: Path) -> Path:
+    return output_dir.parent / f"_tmp_{output_dir.name}"
+
+
+def tmp_hub_id(repo_id: str | None) -> str | None:
+    if not repo_id:
+        return None
+    if "/" not in repo_id:
+        return f"_tmp_{repo_id}"
+    namespace, name = repo_id.rsplit("/", 1)
+    return f"{namespace}/_tmp_{name}"
+
+
 def load_yaml_args(path: Path) -> argparse.Namespace:
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -39,7 +52,9 @@ def load_yaml_args(path: Path) -> argparse.Namespace:
         dtype=data.get("dtype"),
         seed=data.get("seed", 0),
         output_dir=data["output_dir"],
+        tmp_output_dir=Path(data["tmp_output_dir"]) if data.get("tmp_output_dir") else tmp_output_dir(data["output_dir"]),
         push_to_hub=data.get("push_to_hub"),
+        tmp_push_to_hub=data.get("tmp_push_to_hub") or tmp_hub_id(data.get("push_to_hub")),
         private=bool(data.get("private", False)),
     )
 
@@ -73,9 +88,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("teacher_states/gsm8k-qwen35-08b-smoke"),
     )
+    parser.add_argument("--tmp-output-dir", type=Path, default=None)
     parser.add_argument("--push-to-hub", default=None, help="Optional HF repo id, e.g. user/dataset-name.")
+    parser.add_argument("--tmp-push-to-hub", default=None, help="Optional temp HF repo id for generated answers only.")
     parser.add_argument("--private", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.tmp_output_dir = args.tmp_output_dir or tmp_output_dir(args.output_dir)
+    args.tmp_push_to_hub = args.tmp_push_to_hub or tmp_hub_id(args.push_to_hub)
+    return args
 
 
 def main() -> None:
@@ -96,6 +116,9 @@ def main() -> None:
         device=args.device,
         dtype=args.dtype,
         seed=args.seed,
+        tmp_output_dir=str(args.tmp_output_dir) if args.tmp_output_dir else None,
+        tmp_push_to_hub=args.tmp_push_to_hub,
+        private=args.private,
     )
     dataset, timings = collect_teacher_dataset(config)
     args.output_dir.mkdir(parents=True, exist_ok=True)

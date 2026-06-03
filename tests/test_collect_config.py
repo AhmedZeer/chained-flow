@@ -22,3 +22,5 @@ def test_smoke_gsm8k_collection_yaml_parses():
     assert args.dtype is None
     assert args.seed == 0
     assert args.output_dir == Path("teacher_states/gsm8k-qwen35-08b-smoke")
+    assert args.tmp_output_dir == Path("teacher_states/_tmp_gsm8k-qwen35-08b-smoke")
+    assert args.tmp_push_to_hub is None
