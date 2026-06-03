@@ -119,8 +119,10 @@ Smoke YAML config example:
 UV_CACHE_DIR=.uv-cache uv run python scripts/train_hidden_mlp.py train_configs/smoke_mlp.yaml
 ```
 
-GSM8K collection is prompt-only: the script asks the frozen model to generate
-the response greedily, then stores hidden states for that generated sequence.
+GSM8K collection is prompt-only: the script uses vLLM to generate the frozen
+model response greedily, unloads vLLM, then loads the Transformers backbone to
+store hidden states for that generated sequence. vLLM is required in the
+collection environment.
 
 GSM8K collection example:
 
@@ -140,7 +142,7 @@ Set `device: cuda` or `device: cuda:0` in collection/training YAML configs to
 load the frozen model on CUDA. Use `device: auto` to let Transformers choose a
 device map.
 
-For A100 collection, prefer `dtype: bfloat16` in
+For CUDA collection, set `dtype: float16` in
 `collect_configs/smoke_gsm8k.yaml`.
 
 ## Tests

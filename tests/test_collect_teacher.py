@@ -18,6 +18,11 @@ def test_teacher_features_text_first_and_no_attention_mask():
     assert "prompt_length" in features
 
 
+def test_teacher_features_support_float16_hidden_storage():
+    features = teacher_dataset_features("float16")
+    assert str(features["final_hidden"].feature.feature.dtype) == "float16"
+
+
 def test_gsm8k_format_uses_prompt_only_without_reference_answer(fake_wrapper):
     text = format_gsm8k_prompt(
         {"question": "What is 2+2?", "answer": "#### 4"},
@@ -54,7 +59,7 @@ def test_sequence_spans_ignore_eos_inside_prompt():
 
 def test_model_dtype_parser():
     assert _model_torch_dtype(None) is None
-    assert _model_torch_dtype("bfloat16") is torch.bfloat16
+    assert _model_torch_dtype("float16") is torch.float16
 
 
 def test_backbone_prefers_model_attr(fake_wrapper):

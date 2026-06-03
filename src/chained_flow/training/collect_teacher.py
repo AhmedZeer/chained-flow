@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
+import inspect
 from typing import Any, Iterable, Sequence as TypingSequence
 
 from datasets import Dataset, Features, Sequence, Value, load_dataset
 import torch
 from tqdm.auto import tqdm
+from transformers import AutoTokenizer
 
 from chained_flow.context import ChainedFlowContext
 from chained_flow.frozen_lm import DEFAULT_MODEL_ID
@@ -34,14 +37,23 @@ class TeacherCollectionConfig:
     private: bool = False
 
 
-def teacher_dataset_features() -> Features:
+def _hidden_feature_dtype(storage_dtype: str) -> str:
+    if storage_dtype == "float16":
+        return "float16"
+    if storage_dtype == "float32":
+        return "float32"
+    raise ValueError("HF dataset hidden storage supports float32 or float16")
+
+
+def teacher_dataset_features(storage_dtype: str = "float32") -> Features:
+    hidden_dtype = _hidden_feature_dtype(storage_dtype)
     return Features(
         {
             "text": Value("string"),
             "prompt_text": Value("string"),
             "generated_text": Value("string"),
             "input_ids": Sequence(Value("int32")),
-            "final_hidden": Sequence(Sequence(Value("float32"))),
+            "final_hidden": Sequence(Sequence(Value(hidden_dtype))),
             "example_id": Value("string"),
             "source": Value("string"),
             "split": Value("string"),
@@ -94,9 +106,7 @@ def _storage_torch_dtype(name: str) -> torch.dtype:
         return torch.float32
     if name == "float16":
         return torch.float16
-    if name == "bfloat16":
-        return torch.bfloat16
-    raise ValueError("storage_dtype must be one of: float32, float16, bfloat16")
+    raise ValueError("storage_dtype must be one of: float32, float16")
 
 
 def _model_torch_dtype(name: str | None) -> torch.dtype | None:
@@ -106,9 +116,7 @@ def _model_torch_dtype(name: str | None) -> torch.dtype | None:
         return torch.float32
     if name == "float16":
         return torch.float16
-    if name == "bfloat16":
-        return torch.bfloat16
-    raise ValueError("dtype must be one of: float32, float16, bfloat16")
+    raise ValueError("dtype must be one of: float32, float16")
 
 
 def _backbone(model: torch.nn.Module) -> torch.nn.Module:
@@ -117,6 +125,34 @@ def _backbone(model: torch.nn.Module) -> torch.nn.Module:
     if hasattr(model, "base_model"):
         return model.base_model
     raise AttributeError("could not find a backbone module on the causal LM")
+
+
+def _load_vllm():
+    try:
+        from vllm import LLM, SamplingParams
+    except ImportError as exc:
+        raise ImportError(
+            "vLLM is required for teacher answer generation. Install vllm in the "
+            "collection environment before running collect_teacher_states.py."
+        ) from exc
+    return LLM, SamplingParams
+
+
+def _trim_generated_ids(
+    input_ids: list[int],
+    *,
+    prompt_length: int,
+    eos_token_ids: TypingSequence[int],
+    max_tokens: int | None,
+) -> list[int]:
+    if max_tokens is not None:
+        input_ids = input_ids[:max_tokens]
+    prompt_length = min(prompt_length, len(input_ids))
+    eos_ids = set(eos_token_ids)
+    for offset, token_id in enumerate(input_ids[prompt_length:]):
+        if token_id in eos_ids:
+            return input_ids[: prompt_length + offset + 1]
+    return input_ids
 
 
 def _iter_limited(dataset: Iterable[dict[str, Any]], limit: int | None) -> Iterable[tuple[int, dict[str, Any]]]:
@@ -215,20 +251,16 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(config.seed)
     timings = TimingStats()
-    print(f"loading model: {config.model_id}", flush=True)
-    context = ChainedFlowContext.from_pretrained(
-        config.model_id,
-        device=config.device,
-        dtype=_model_torch_dtype(config.dtype),
-        local_files_only=config.local_files_only,
-    )
-    timings.merge(context.timings)
-    wrapper = context.frozen_lm
     storage_dtype = _storage_torch_dtype(config.storage_dtype)
-    pad_token_id = _ensure_padding(wrapper.tokenizer, wrapper.eos_token_id)
-    eos_token_ids = _eos_token_ids(wrapper.tokenizer, wrapper.eos_token_id)
-    print(f"model loaded: {config.model_id}", flush=True)
-    print(f"model device: {wrapper.device}", flush=True)
+    print(f"loading tokenizer: {config.model_id}", flush=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.model_id,
+        local_files_only=config.local_files_only,
+        trust_remote_code=True,
+    )
+    pad_token_id = _ensure_padding(tokenizer, getattr(tokenizer, "eos_token_id", None))
+    eos_token_ids = _eos_token_ids(tokenizer, getattr(tokenizer, "eos_token_id", None))
+    print(f"tokenizer loaded: {config.model_id}", flush=True)
 
     print(
         f"loading dataset: {config.dataset_name}/{config.dataset_config} split={config.split}",
@@ -243,64 +275,80 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     print(f"dataset loaded: rows={len(raw_dataset)}", flush=True)
 
     answer_rows: list[dict[str, Any]] = []
-    with timed_section(timings, "teacher_collection", wrapper.device):
+    with timed_section(timings, "teacher_collection"):
         total = min(config.limit, len(raw_dataset)) if config.limit is not None else len(raw_dataset)
         batches = list(_batched(_iter_limited(raw_dataset, config.limit), config.batch_size))
+        print(f"loading vLLM generation model: {config.model_id}", flush=True)
+        LLM, SamplingParams = _load_vllm()
+        llm_kwargs: dict[str, Any] = {
+            "model": config.model_id,
+            "tokenizer": config.model_id,
+            "dtype": config.dtype or "auto",
+            "trust_remote_code": True,
+        }
+        if "seed" in inspect.signature(LLM).parameters:
+            llm_kwargs["seed"] = config.seed
+        with timed_section(timings, "generation_model_load"):
+            llm = LLM(**llm_kwargs)
+        print(f"vLLM generation model loaded: {config.model_id}", flush=True)
         generation_bar = tqdm(total=total, desc="phase 1/2 generating answers")
-        with timed_section(timings, "teacher_generation", wrapper.device):
+        with timed_section(timings, "teacher_generation"):
+            sampling_signature = inspect.signature(SamplingParams).parameters
+            sampling_kwargs: dict[str, Any] = {
+                "temperature": 0.0,
+                "max_tokens": config.generation_max_new_tokens,
+                "stop_token_ids": eos_token_ids,
+            }
+            if "skip_special_tokens" in sampling_signature:
+                sampling_kwargs["skip_special_tokens"] = False
+            if "seed" in sampling_signature:
+                sampling_kwargs["seed"] = config.seed
+            sampling_params = SamplingParams(**sampling_kwargs)
             for batch in batches:
                 batch_indices = [index for index, _ in batch]
                 batch_examples = [example for _, example in batch]
-                prompt_texts = [format_gsm8k_prompt(example, wrapper.tokenizer) for example in batch_examples]
-                encoded = wrapper.tokenizer(
-                    prompt_texts,
-                    return_tensors="pt",
-                    padding=True,
-                )
-                prompt_ids = encoded.input_ids.to(wrapper.device)
-                prompt_attention_mask = encoded.attention_mask.to(wrapper.device)
-                prompt_lengths = prompt_attention_mask.sum(dim=1).tolist()
-                generated_ids = wrapper.model.generate(
-                    input_ids=prompt_ids,
-                    attention_mask=prompt_attention_mask,
-                    max_new_tokens=config.generation_max_new_tokens,
-                    do_sample=False,
-                    temperature=None,
-                    top_p=None,
-                    top_k=None,
-                    pad_token_id=pad_token_id,
-                    eos_token_id=eos_token_ids,
-                )
+                prompt_texts = [format_gsm8k_prompt(example, tokenizer) for example in batch_examples]
+                request_outputs = llm.generate(prompt_texts, sampling_params)
                 generation_bar.update(len(batch))
-                input_ids = generated_ids.to(wrapper.device)
-                if config.max_tokens is not None:
-                    input_ids = input_ids[:, : config.max_tokens]
-                spans = _sequence_spans(input_ids, pad_token_id, eos_token_ids, prompt_lengths)
-                for row_idx, (start, end) in enumerate(spans):
-                    input_row = input_ids[row_idx, start:end]
-                    if input_row.shape[0] < 2:
+                for row_idx, output in enumerate(request_outputs):
+                    prompt_ids = getattr(output, "prompt_token_ids", None)
+                    if prompt_ids is None:
+                        prompt_ids = tokenizer.encode(prompt_texts[row_idx], add_special_tokens=False)
+                    generated_token_ids = output.outputs[0].token_ids
+                    input_ids = list(prompt_ids) + list(generated_token_ids)
+                    prompt_length = len(prompt_ids)
+                    input_ids = _trim_generated_ids(
+                        input_ids,
+                        prompt_length=prompt_length,
+                        eos_token_ids=eos_token_ids,
+                        max_tokens=config.max_tokens,
+                    )
+                    if len(input_ids) < 2:
                         continue
-                    prompt_length = min(int(prompt_lengths[row_idx]), input_row.shape[0])
-                    text = wrapper.decode(input_row, skip_special_tokens=False)
-                    prompt_text = wrapper.decode(input_row[:prompt_length], skip_special_tokens=False)
-                    generated_text = wrapper.decode(input_row[prompt_length:], skip_special_tokens=False)
+                    prompt_length = min(prompt_length, len(input_ids))
+                    generated_text = tokenizer.decode(input_ids[prompt_length:], skip_special_tokens=False)
+                    text = prompt_texts[row_idx] + generated_text
                     answer_rows.append(
                         {
                             "text": text,
-                            "prompt_text": prompt_text,
+                            "prompt_text": prompt_texts[row_idx],
                             "generated_text": generated_text,
-                            "input_ids": input_row.detach().cpu().to(torch.int32).tolist(),
+                            "input_ids": [int(token_id) for token_id in input_ids],
                             "example_id": str(batch_examples[row_idx].get("id", batch_indices[row_idx])),
                             "source": config.source,
                             "split": config.split,
                             "format_name": config.format_name,
                             "model_id": config.model_id,
                             "hidden_dtype": config.storage_dtype,
-                            "num_tokens": int(input_row.shape[0]),
+                            "num_tokens": int(len(input_ids)),
                             "prompt_length": int(prompt_length),
                         }
                     )
         generation_bar.close()
+        del llm
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         with timed_section(timings, "tmp_answer_dataset_build"):
             answer_dataset = Dataset.from_list(answer_rows, features=teacher_answer_dataset_features())
@@ -310,6 +358,19 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
         if config.tmp_push_to_hub:
             print(f"pushing temporary answer dataset: {config.tmp_push_to_hub}", flush=True)
             answer_dataset.push_to_hub(config.tmp_push_to_hub, private=config.private)
+
+        print(f"loading hidden extraction model: {config.model_id}", flush=True)
+        context = ChainedFlowContext.from_pretrained(
+            config.model_id,
+            device=config.device,
+            dtype=_model_torch_dtype(config.dtype),
+            local_files_only=config.local_files_only,
+        )
+        timings.merge(context.timings)
+        wrapper = context.frozen_lm
+        pad_token_id = _ensure_padding(wrapper.tokenizer, wrapper.eos_token_id)
+        print(f"hidden extraction model loaded: {config.model_id}", flush=True)
+        print(f"model device: {wrapper.device}", flush=True)
 
         rows: list[dict[str, Any]] = []
         hidden_bar = tqdm(total=len(answer_rows), desc="phase 2/2 extracting hidden states")
@@ -341,12 +402,12 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
                     rows.append(
                         {
                             **row,
-                            "final_hidden": hidden.detach().to(storage_dtype).cpu().to(torch.float32).tolist(),
+                            "final_hidden": hidden.detach().cpu().to(storage_dtype).tolist(),
                         }
                     )
                 hidden_bar.update(len(batch_rows))
         hidden_bar.close()
 
     with timed_section(timings, "dataset_build"):
-        dataset = Dataset.from_list(rows, features=teacher_dataset_features())
+        dataset = Dataset.from_list(rows, features=teacher_dataset_features(config.storage_dtype))
     return dataset, timings

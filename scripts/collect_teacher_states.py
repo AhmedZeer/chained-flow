@@ -76,12 +76,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument(
         "--storage-dtype",
-        choices=["float32", "float16", "bfloat16"],
+        choices=["float32", "float16"],
         default="float32",
     )
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--device", default=None, help="Device for model loading, e.g. cuda, cuda:0, cpu, mps, or auto.")
-    parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16"], default=None)
+    parser.add_argument("--dtype", choices=["float32", "float16"], default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--output-dir",
