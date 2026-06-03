@@ -7,6 +7,7 @@ from chained_flow.training.collect_teacher import (
     _effective_generation_batch_size,
     _effective_hidden_batch_size,
     _model_torch_dtype,
+    _resolve_range,
     _sequence_spans,
     format_gsm8k_prompt,
     teacher_dataset_features,
@@ -59,6 +60,12 @@ def test_effective_batch_sizes_fallback_to_batch_size():
     config = TeacherCollectionConfig(batch_size=16, generation_batch_size=32, hidden_batch_size=4)
     assert _effective_generation_batch_size(config) == 32
     assert _effective_hidden_batch_size(config) == 4
+
+
+def test_resolve_range_prefers_explicit_end_and_limit_fallback():
+    assert _resolve_range(7473, start=0, end=1024, limit=None) == (0, 1024)
+    assert _resolve_range(7473, start=1024, end=None, limit=1024) == (1024, 2048)
+    assert _resolve_range(1500, start=1024, end=2048, limit=None) == (1024, 1500)
 
 
 def test_gsm8k_format_uses_prompt_only_without_reference_answer(fake_wrapper):

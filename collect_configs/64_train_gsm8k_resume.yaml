@@ -1,7 +1,8 @@
 model_id: Qwen/Qwen3.5-0.8B
 answer_dataset_path: sghosts/_tmp_cf_gsm8k_64_train_v1
 answer_dataset_split: train
-limit: 64
+dataset_start: 0
+dataset_end: 64
 batch_size: 8
 hidden_batch_size: 8
 storage_dtype: float16

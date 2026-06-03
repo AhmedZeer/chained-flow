@@ -22,6 +22,8 @@ class TeacherCollectionConfig:
     source: str = "gsm8k"
     format_name: str = "qwen_chat_qa"
     limit: int | None = None
+    dataset_start: int = 0
+    dataset_end: int | None = None
     max_tokens: int | None = None
     generation_max_new_tokens: int = 256
     batch_size: int = 1
@@ -129,11 +131,22 @@ def _backbone(model: torch.nn.Module) -> torch.nn.Module:
     raise AttributeError("could not find a backbone module on the causal LM")
 
 
-def _iter_limited(dataset: Iterable[dict[str, Any]], limit: int | None) -> Iterable[tuple[int, dict[str, Any]]]:
-    for index, example in enumerate(dataset):
-        if limit is not None and index >= limit:
-            break
-        yield index, example
+def _resolve_range(total_rows: int, *, start: int, end: int | None, limit: int | None) -> tuple[int, int]:
+    if start < 0:
+        raise ValueError("dataset_start must be non-negative")
+    if end is not None and end < start:
+        raise ValueError("dataset_end must be greater than or equal to dataset_start")
+    resolved_end = end
+    if resolved_end is None and limit is not None:
+        resolved_end = start + limit
+    if resolved_end is None:
+        resolved_end = total_rows
+    return min(start, total_rows), min(resolved_end, total_rows)
+
+
+def _iter_range(dataset: TypingSequence[dict[str, Any]], start: int, end: int) -> Iterable[tuple[int, dict[str, Any]]]:
+    for index in range(start, end):
+        yield index, dataset[index]
 
 
 def _batched(items: Iterable[tuple[int, dict[str, Any]]], batch_size: int) -> Iterable[list[tuple[int, dict[str, Any]]]]:
@@ -252,11 +265,16 @@ def _answer_row_from_dataset_row(row: dict[str, Any], *, storage_dtype: str) -> 
     }
 
 
-def _limited_answer_rows(answer_dataset: Dataset, *, limit: int | None, storage_dtype: str) -> list[dict[str, Any]]:
-    total = min(limit, len(answer_dataset)) if limit is not None else len(answer_dataset)
+def _ranged_answer_rows(
+    answer_dataset: Dataset,
+    *,
+    start: int,
+    end: int,
+    storage_dtype: str,
+) -> list[dict[str, Any]]:
     return [
         _answer_row_from_dataset_row(answer_dataset[index], storage_dtype=storage_dtype)
-        for index in range(total)
+        for index in range(start, end)
     ]
 
 
@@ -291,10 +309,18 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
             with timed_section(timings, "answer_dataset_load", wrapper.device):
                 answer_dataset = _load_answer_dataset(config.answer_dataset_path, config.answer_dataset_split)
             print(f"answer dataset loaded: rows={len(answer_dataset)}", flush=True)
+            range_start, range_end = _resolve_range(
+                len(answer_dataset),
+                start=config.dataset_start,
+                end=config.dataset_end,
+                limit=config.limit,
+            )
+            print(f"answer dataset range: [{range_start}:{range_end}]", flush=True)
             with timed_section(timings, "answer_dataset_rows", wrapper.device):
-                answer_rows = _limited_answer_rows(
+                answer_rows = _ranged_answer_rows(
                     answer_dataset,
-                    limit=config.limit,
+                    start=range_start,
+                    end=range_end,
                     storage_dtype=config.storage_dtype,
                 )
         else:
@@ -309,10 +335,17 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
                     split=config.split,
                 )
             print(f"dataset loaded: rows={len(raw_dataset)}", flush=True)
+            range_start, range_end = _resolve_range(
+                len(raw_dataset),
+                start=config.dataset_start,
+                end=config.dataset_end,
+                limit=config.limit,
+            )
+            print(f"dataset range: [{range_start}:{range_end}]", flush=True)
 
-            total = min(config.limit, len(raw_dataset)) if config.limit is not None else len(raw_dataset)
+            total = range_end - range_start
             generation_batch_size = _effective_generation_batch_size(config)
-            batches = list(_batched(_iter_limited(raw_dataset, config.limit), generation_batch_size))
+            batches = list(_batched(_iter_range(raw_dataset, range_start, range_end), generation_batch_size))
             generation_bar = tqdm(total=total, desc="phase 1/2 generating answers")
             with timed_section(timings, "teacher_generation", wrapper.device):
                 for batch in batches:

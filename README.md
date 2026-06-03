@@ -130,6 +130,8 @@ come from CLI args or a YAML config, not `.env`.
 
 Collection first writes/pushes a temporary answer-only dataset using a `_tmp`
 prefix, then runs hidden-state extraction and writes the final dataset.
+Use `dataset_start` and `dataset_end` for half-open dataset shards such as
+`[0:1024]` and `[1024:2048]`; `limit` remains a backward-compatible fallback.
 Use `generation_batch_size` and `hidden_batch_size` in YAML configs to tune the
 two phases separately; `batch_size` remains the fallback for both.
 

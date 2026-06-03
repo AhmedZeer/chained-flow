@@ -4,7 +4,8 @@ dataset_config: main
 split: train
 source: gsm8k
 format_name: qwen_chat_qa
-limit: 1024
+dataset_start: 0
+dataset_end: 1024
 generation_max_new_tokens: 4096
 generation_batch_size: 64
 hidden_batch_size: 8

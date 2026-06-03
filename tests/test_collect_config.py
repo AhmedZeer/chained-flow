@@ -17,6 +17,8 @@ def test_smoke_gsm8k_collection_yaml_parses():
     args = module.load_yaml_args(Path("collect_configs/smoke_gsm8k.yaml"))
     assert args.dataset_name == "openai/gsm8k"
     assert args.limit == 10
+    assert args.dataset_start == 0
+    assert args.dataset_end is None
     assert args.local_files_only is True
     assert args.device is None
     assert args.dtype == "float16"
@@ -31,6 +33,9 @@ def test_smoke_gsm8k_collection_yaml_parses():
 def test_64_gsm8k_collection_yaml_parses_split_batch_sizes():
     module = load_script_module()
     args = module.load_yaml_args(Path("collect_configs/64_train_gsm8k.yaml"))
+    assert args.dataset_start == 0
+    assert args.dataset_end == 64
+    assert args.limit is None
     assert args.batch_size == 64
     assert args.generation_batch_size == 64
     assert args.hidden_batch_size == 8
