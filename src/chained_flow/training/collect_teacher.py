@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import gc
-import inspect
 from typing import Any, Iterable, Sequence as TypingSequence
 
 from datasets import Dataset, Features, Sequence, Value, load_dataset
 import torch
 from tqdm.auto import tqdm
-from transformers import AutoConfig, AutoTokenizer
 
 from chained_flow.context import ChainedFlowContext
 from chained_flow.frozen_lm import DEFAULT_MODEL_ID
@@ -32,7 +29,6 @@ class TeacherCollectionConfig:
     device: str | None = None
     dtype: str | None = None
     seed: int = 0
-    vllm_max_model_len: int | None = None
     tmp_output_dir: str | None = None
     tmp_push_to_hub: str | None = None
     private: bool = False
@@ -126,89 +122,6 @@ def _backbone(model: torch.nn.Module) -> torch.nn.Module:
     if hasattr(model, "base_model"):
         return model.base_model
     raise AttributeError("could not find a backbone module on the causal LM")
-
-
-def _load_vllm():
-    try:
-        from vllm import LLM, SamplingParams
-    except ImportError as exc:
-        raise ImportError(
-            "vLLM is required for offline teacher answer generation. Install vllm in the "
-            "collection environment before running collect_teacher_states.py."
-        ) from exc
-    return LLM, SamplingParams
-
-
-def _int_config_attr(config: Any, name: str) -> int | None:
-    value = getattr(config, name, None)
-    if isinstance(value, int) and value > 0:
-        return value
-    return None
-
-
-def _derive_num_attention_heads(config: Any) -> int | None:
-    for name in ("num_attention_heads", "n_head", "num_heads", "n_heads"):
-        value = _int_config_attr(config, name)
-        if value is not None:
-            return value
-
-    hidden_size = _int_config_attr(config, "hidden_size") or _int_config_attr(config, "n_embd")
-    head_dim = _int_config_attr(config, "head_dim") or _int_config_attr(config, "attention_head_size")
-    if hidden_size is not None and head_dim is not None and hidden_size % head_dim == 0:
-        return hidden_size // head_dim
-
-    return _int_config_attr(config, "num_key_value_heads")
-
-
-def _derived_num_attention_heads_property(config: Any) -> int:
-    hidden_size = _int_config_attr(config, "hidden_size") or _int_config_attr(config, "n_embd")
-    head_dim = _int_config_attr(config, "head_dim") or _int_config_attr(config, "attention_head_size")
-    if hidden_size is not None and head_dim is not None and hidden_size % head_dim == 0:
-        return hidden_size // head_dim
-
-    num_key_value_heads = _int_config_attr(config, "num_key_value_heads")
-    if num_key_value_heads is not None:
-        return num_key_value_heads
-
-    raise AttributeError("num_attention_heads")
-
-
-def _vllm_hf_overrides(model_id: str, *, local_files_only: bool) -> dict[str, int]:
-    hf_config = AutoConfig.from_pretrained(
-        model_id,
-        local_files_only=local_files_only,
-        trust_remote_code=True,
-    )
-    overrides: dict[str, int] = {}
-    if not hasattr(hf_config, "num_attention_heads"):
-        num_attention_heads = _derive_num_attention_heads(hf_config)
-        if num_attention_heads is not None:
-            overrides["num_attention_heads"] = num_attention_heads
-            setattr(type(hf_config), "num_attention_heads", property(_derived_num_attention_heads_property))
-    return overrides
-
-
-def _signature_accepts(parameters: Iterable[inspect.Parameter], name: str) -> bool:
-    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters) or any(
-        param.name == name for param in parameters
-    )
-
-
-def _trim_generated_ids(
-    input_ids: list[int],
-    *,
-    prompt_length: int,
-    eos_token_ids: TypingSequence[int],
-    max_tokens: int | None,
-) -> list[int]:
-    if max_tokens is not None:
-        input_ids = input_ids[:max_tokens]
-    prompt_length = min(prompt_length, len(input_ids))
-    eos_ids = set(eos_token_ids)
-    for offset, token_id in enumerate(input_ids[prompt_length:]):
-        if token_id in eos_ids:
-            return input_ids[: prompt_length + offset + 1]
-    return input_ids
 
 
 def _iter_limited(dataset: Iterable[dict[str, Any]], limit: int | None) -> Iterable[tuple[int, dict[str, Any]]]:
@@ -307,16 +220,20 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(config.seed)
     timings = TimingStats()
-    storage_dtype = _storage_torch_dtype(config.storage_dtype)
-    print(f"loading tokenizer: {config.model_id}", flush=True)
-    tokenizer = AutoTokenizer.from_pretrained(
+    print(f"loading model: {config.model_id}", flush=True)
+    context = ChainedFlowContext.from_pretrained(
         config.model_id,
+        device=config.device,
+        dtype=_model_torch_dtype(config.dtype),
         local_files_only=config.local_files_only,
-        trust_remote_code=True,
     )
-    pad_token_id = _ensure_padding(tokenizer, getattr(tokenizer, "eos_token_id", None))
-    eos_token_ids = _eos_token_ids(tokenizer, getattr(tokenizer, "eos_token_id", None))
-    print(f"tokenizer loaded: {config.model_id}", flush=True)
+    timings.merge(context.timings)
+    wrapper = context.frozen_lm
+    storage_dtype = _storage_torch_dtype(config.storage_dtype)
+    pad_token_id = _ensure_padding(wrapper.tokenizer, wrapper.eos_token_id)
+    eos_token_ids = _eos_token_ids(wrapper.tokenizer, wrapper.eos_token_id)
+    print(f"model loaded: {config.model_id}", flush=True)
+    print(f"model device: {wrapper.device}", flush=True)
 
     print(
         f"loading dataset: {config.dataset_name}/{config.dataset_config} split={config.split}",
@@ -331,92 +248,64 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     print(f"dataset loaded: rows={len(raw_dataset)}", flush=True)
 
     answer_rows: list[dict[str, Any]] = []
-    with timed_section(timings, "teacher_collection"):
+    with timed_section(timings, "teacher_collection", wrapper.device):
         total = min(config.limit, len(raw_dataset)) if config.limit is not None else len(raw_dataset)
         batches = list(_batched(_iter_limited(raw_dataset, config.limit), config.batch_size))
-        print(f"loading vLLM generation model: {config.model_id}", flush=True)
-        LLM, SamplingParams = _load_vllm()
-        llm_signature = inspect.signature(LLM).parameters
-        llm_kwargs: dict[str, Any] = {
-            "model": config.model_id,
-            "tokenizer": config.model_id,
-            "dtype": config.dtype or "auto",
-            "trust_remote_code": True,
-        }
-        hf_overrides = _vllm_hf_overrides(config.model_id, local_files_only=config.local_files_only)
-        if hf_overrides and _signature_accepts(llm_signature.values(), "hf_overrides"):
-            print(f"using vLLM HF config overrides: {hf_overrides}", flush=True)
-            llm_kwargs["hf_overrides"] = hf_overrides
-        elif hf_overrides:
-            print(
-                f"vLLM HF config overrides unavailable in this vLLM version: {hf_overrides}",
-                flush=True,
-            )
-        if config.vllm_max_model_len is not None and _signature_accepts(llm_signature.values(), "max_model_len"):
-            llm_kwargs["max_model_len"] = config.vllm_max_model_len
-        if _signature_accepts(llm_signature.values(), "seed"):
-            llm_kwargs["seed"] = config.seed
-        with timed_section(timings, "generation_model_load"):
-            llm = LLM(**llm_kwargs)
-        print(f"vLLM generation model loaded: {config.model_id}", flush=True)
         generation_bar = tqdm(total=total, desc="phase 1/2 generating answers")
-        with timed_section(timings, "teacher_generation"):
-            sampling_signature = inspect.signature(SamplingParams).parameters
-            sampling_kwargs: dict[str, Any] = {
-                "temperature": 0.0,
-                "max_tokens": config.generation_max_new_tokens,
-                "stop_token_ids": eos_token_ids,
-            }
-            if "skip_special_tokens" in sampling_signature:
-                sampling_kwargs["skip_special_tokens"] = False
-            if "seed" in sampling_signature:
-                sampling_kwargs["seed"] = config.seed
-            sampling_params = SamplingParams(**sampling_kwargs)
+        with timed_section(timings, "teacher_generation", wrapper.device):
             for batch in batches:
                 batch_indices = [index for index, _ in batch]
                 batch_examples = [example for _, example in batch]
-                prompt_texts = [format_gsm8k_prompt(example, tokenizer) for example in batch_examples]
-                request_outputs = llm.generate(prompt_texts, sampling_params)
+                prompt_texts = [format_gsm8k_prompt(example, wrapper.tokenizer) for example in batch_examples]
+                encoded = wrapper.tokenizer(
+                    prompt_texts,
+                    return_tensors="pt",
+                    padding=True,
+                )
+                prompt_ids = encoded.input_ids.to(wrapper.device)
+                prompt_attention_mask = encoded.attention_mask.to(wrapper.device)
+                prompt_lengths = prompt_attention_mask.sum(dim=1).tolist()
+                generated_ids = wrapper.model.generate(
+                    input_ids=prompt_ids,
+                    attention_mask=prompt_attention_mask,
+                    max_new_tokens=config.generation_max_new_tokens,
+                    do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                    top_k=None,
+                    pad_token_id=pad_token_id,
+                    eos_token_id=eos_token_ids,
+                )
                 generation_bar.update(len(batch))
-                for row_idx, output in enumerate(request_outputs):
-                    prompt_ids = getattr(output, "prompt_token_ids", None)
-                    if prompt_ids is None:
-                        prompt_ids = tokenizer.encode(prompt_texts[row_idx], add_special_tokens=False)
-                    generated_token_ids = output.outputs[0].token_ids
-                    input_ids = list(prompt_ids) + list(generated_token_ids)
-                    prompt_length = len(prompt_ids)
-                    input_ids = _trim_generated_ids(
-                        input_ids,
-                        prompt_length=prompt_length,
-                        eos_token_ids=eos_token_ids,
-                        max_tokens=config.max_tokens,
-                    )
-                    if len(input_ids) < 2:
+                input_ids = generated_ids.to(wrapper.device)
+                if config.max_tokens is not None:
+                    input_ids = input_ids[:, : config.max_tokens]
+                spans = _sequence_spans(input_ids, pad_token_id, eos_token_ids, prompt_lengths)
+                for row_idx, (start, end) in enumerate(spans):
+                    input_row = input_ids[row_idx, start:end]
+                    if input_row.shape[0] < 2:
                         continue
-                    prompt_length = min(prompt_length, len(input_ids))
-                    generated_text = tokenizer.decode(input_ids[prompt_length:], skip_special_tokens=False)
-                    text = prompt_texts[row_idx] + generated_text
+                    prompt_length = min(int(prompt_lengths[row_idx]), input_row.shape[0])
+                    text = wrapper.decode(input_row, skip_special_tokens=False)
+                    prompt_text = wrapper.decode(input_row[:prompt_length], skip_special_tokens=False)
+                    generated_text = wrapper.decode(input_row[prompt_length:], skip_special_tokens=False)
                     answer_rows.append(
                         {
                             "text": text,
-                            "prompt_text": prompt_texts[row_idx],
+                            "prompt_text": prompt_text,
                             "generated_text": generated_text,
-                            "input_ids": [int(token_id) for token_id in input_ids],
+                            "input_ids": input_row.detach().cpu().to(torch.int32).tolist(),
                             "example_id": str(batch_examples[row_idx].get("id", batch_indices[row_idx])),
                             "source": config.source,
                             "split": config.split,
                             "format_name": config.format_name,
                             "model_id": config.model_id,
                             "hidden_dtype": config.storage_dtype,
-                            "num_tokens": int(len(input_ids)),
+                            "num_tokens": int(input_row.shape[0]),
                             "prompt_length": int(prompt_length),
                         }
                     )
         generation_bar.close()
-        del llm
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
         with timed_section(timings, "tmp_answer_dataset_build"):
             answer_dataset = Dataset.from_list(answer_rows, features=teacher_answer_dataset_features())
@@ -426,19 +315,6 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
         if config.tmp_push_to_hub:
             print(f"pushing temporary answer dataset: {config.tmp_push_to_hub}", flush=True)
             answer_dataset.push_to_hub(config.tmp_push_to_hub, private=config.private)
-
-        print(f"loading hidden extraction model: {config.model_id}", flush=True)
-        context = ChainedFlowContext.from_pretrained(
-            config.model_id,
-            device=config.device,
-            dtype=_model_torch_dtype(config.dtype),
-            local_files_only=config.local_files_only,
-        )
-        timings.merge(context.timings)
-        wrapper = context.frozen_lm
-        pad_token_id = _ensure_padding(wrapper.tokenizer, wrapper.eos_token_id)
-        print(f"hidden extraction model loaded: {config.model_id}", flush=True)
-        print(f"model device: {wrapper.device}", flush=True)
 
         rows: list[dict[str, Any]] = []
         hidden_bar = tqdm(total=len(answer_rows), desc="phase 2/2 extracting hidden states")

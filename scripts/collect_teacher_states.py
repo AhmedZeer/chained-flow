@@ -51,7 +51,6 @@ def load_yaml_args(path: Path) -> argparse.Namespace:
         device=data.get("device"),
         dtype=data.get("dtype"),
         seed=data.get("seed", 0),
-        vllm_max_model_len=data.get("vllm_max_model_len"),
         output_dir=data["output_dir"],
         tmp_output_dir=Path(data["tmp_output_dir"]) if data.get("tmp_output_dir") else tmp_output_dir(data["output_dir"]),
         push_to_hub=data.get("push_to_hub"),
@@ -84,7 +83,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=None, help="Device for model loading, e.g. cuda, cuda:0, cpu, mps, or auto.")
     parser.add_argument("--dtype", choices=["float32", "float16"], default=None)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--vllm-max-model-len", type=int, default=None)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -118,7 +116,6 @@ def main() -> None:
         device=args.device,
         dtype=args.dtype,
         seed=args.seed,
-        vllm_max_model_len=args.vllm_max_model_len,
         tmp_output_dir=str(args.tmp_output_dir) if args.tmp_output_dir else None,
         tmp_push_to_hub=args.tmp_push_to_hub,
         private=args.private,
