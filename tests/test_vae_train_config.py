@@ -30,8 +30,8 @@ def test_smoke_vae_yaml_parses():
 
     assert model_args.vae_type == "residual_mlp"
     assert model_args.latent_size == 256
-    assert data_args.dataset_path == "sghosts/cf_gsm8k_64_train_v1"
+    assert data_args.dataset_path == "sghosts/cf_gsm8k_1k_train"
     assert data_args.dataset_split == "train"
-    assert data_args.tokens_per_epoch == 64
+    assert data_args.tokens_per_epoch == 1024
     assert loss_args.beta == 0.0001
-    assert training_args.output_dir == "vae_checkpoints/hidden-vae-smoke"
+    assert training_args.output_dir == "/content/drive/MyDrive/chained-flow/vae/ckpts/hidden-vae-smoke"

@@ -103,6 +103,10 @@ def train_vae_with_trainer(
     training_args: TrainingArguments,
 ) -> dict[str, Any]:
     torch.manual_seed(training_args.seed)
+    print(
+        f"loading VAE dataset: {data_args.dataset_path} split={data_args.dataset_split}",
+        flush=True,
+    )
     dataset = TeacherHiddenTokenDataset.from_path(
         data_args.dataset_path,
         split=data_args.dataset_split,
@@ -110,18 +114,37 @@ def train_vae_with_trainer(
         seed=data_args.token_seed,
         response_only=data_args.response_only,
     )
+    print(
+        f"VAE dataset initialized: tokens_per_epoch={len(dataset)} "
+        f"rows={len(dataset.dataset)} response_only={data_args.response_only}",
+        flush=True,
+    )
+    print(
+        f"initializing VAE model: type={model_args.vae_type} "
+        f"hidden_size={model_args.hidden_size} latent_size={model_args.latent_size} "
+        f"intermediate_size={model_args.intermediate_size}",
+        flush=True,
+    )
     model = HiddenVAETrainingModule(model_args, loss_args)
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    print(f"VAE model initialized: parameters={parameter_count}", flush=True)
+    print(f"initializing VAE trainer: output_dir={training_args.output_dir}", flush=True)
     trainer = VAEComponentLoggingTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
         data_collator=collate_hidden_tokens,
     )
+    print("VAE trainer initialized", flush=True)
+    print("VAE training started", flush=True)
     train_result = trainer.train(resume_from_checkpoint=getattr(training_args, "resume_from_checkpoint", None))
+    print("VAE training finished", flush=True)
+    print(f"saving VAE model: {training_args.output_dir}", flush=True)
     trainer.save_model(training_args.output_dir)
     trainer.log_metrics("train", train_result.metrics)
     trainer.save_metrics("train", train_result.metrics)
     trainer.save_state()
+    print(f"VAE training state saved: {training_args.output_dir}", flush=True)
 
     output_dir = Path(training_args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
