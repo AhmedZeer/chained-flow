@@ -137,6 +137,9 @@ Set `device: cuda` or `device: cuda:0` in collection/training YAML configs to
 load the frozen model on CUDA. Use `device: auto` to let Transformers choose a
 device map.
 
+For A100 collection, prefer `dtype: bfloat16` in
+`collect_configs/smoke_gsm8k.yaml`.
+
 ## Tests
 
 ```bash

@@ -1,6 +1,12 @@
 import torch
 
-from chained_flow.training.collect_teacher import _sequence_spans, format_gsm8k_prompt, teacher_dataset_features
+from chained_flow.training.collect_teacher import (
+    _backbone,
+    _model_torch_dtype,
+    _sequence_spans,
+    format_gsm8k_prompt,
+    teacher_dataset_features,
+)
 
 
 def test_teacher_features_text_first_and_no_attention_mask():
@@ -44,3 +50,17 @@ def test_sequence_spans_ignore_eos_inside_prompt():
         prompt_lengths=[4],
     )
     assert spans == [(1, 6)]
+
+
+def test_model_dtype_parser():
+    assert _model_torch_dtype(None) is None
+    assert _model_torch_dtype("bfloat16") is torch.bfloat16
+
+
+def test_backbone_prefers_model_attr(fake_wrapper):
+    class ModelWithBackbone:
+        def __init__(self):
+            self.model = object()
+
+    model = ModelWithBackbone()
+    assert _backbone(model) is model.model

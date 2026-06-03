@@ -10,6 +10,8 @@ batch_size: 1
 storage_dtype: float32
 local_files_only: true
 device:
+dtype:
+seed: 0
 output_dir: teacher_states/gsm8k-qwen35-08b-smoke
 push_to_hub:
 private: false

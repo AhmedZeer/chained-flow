@@ -27,6 +27,8 @@ class TeacherCollectionConfig:
     storage_dtype: str = "float32"
     local_files_only: bool = False
     device: str | None = None
+    dtype: str | None = None
+    seed: int = 0
 
 
 def teacher_dataset_features() -> Features:
@@ -73,6 +75,26 @@ def _storage_torch_dtype(name: str) -> torch.dtype:
     if name == "bfloat16":
         return torch.bfloat16
     raise ValueError("storage_dtype must be one of: float32, float16, bfloat16")
+
+
+def _model_torch_dtype(name: str | None) -> torch.dtype | None:
+    if name is None:
+        return None
+    if name == "float32":
+        return torch.float32
+    if name == "float16":
+        return torch.float16
+    if name == "bfloat16":
+        return torch.bfloat16
+    raise ValueError("dtype must be one of: float32, float16, bfloat16")
+
+
+def _backbone(model: torch.nn.Module) -> torch.nn.Module:
+    if hasattr(model, "model"):
+        return model.model
+    if hasattr(model, "base_model"):
+        return model.base_model
+    raise AttributeError("could not find a backbone module on the causal LM")
 
 
 def _iter_limited(dataset: Iterable[dict[str, Any]], limit: int | None) -> Iterable[tuple[int, dict[str, Any]]]:
@@ -167,11 +189,15 @@ def _left_pad_sequences(
 
 @torch.inference_mode()
 def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, TimingStats]:
+    torch.manual_seed(config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config.seed)
     timings = TimingStats()
     print(f"loading model: {config.model_id}", flush=True)
     context = ChainedFlowContext.from_pretrained(
         config.model_id,
         device=config.device,
+        dtype=_model_torch_dtype(config.dtype),
         local_files_only=config.local_files_only,
     )
     timings.merge(context.timings)
@@ -196,12 +222,10 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
     rows: list[dict[str, Any]] = []
     with timed_section(timings, "teacher_collection", wrapper.device):
         total = min(config.limit, len(raw_dataset)) if config.limit is not None else len(raw_dataset)
-        examples = tqdm(
-            _iter_limited(raw_dataset, config.limit),
-            total=total,
-            desc="collecting teacher states",
-        )
-        for batch in _batched(examples, config.batch_size):
+        batches = list(_batched(_iter_limited(raw_dataset, config.limit), config.batch_size))
+        generation_bar = tqdm(total=total, desc="phase 1/2 generating answers")
+        hidden_bar = tqdm(total=total, desc="phase 2/2 extracting hidden states")
+        for batch in batches:
             batch_indices = [index for index, _ in batch]
             batch_examples = [example for _, example in batch]
             prompt_texts = [format_gsm8k_prompt(example, wrapper.tokenizer) for example in batch_examples]
@@ -218,9 +242,13 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
                 attention_mask=prompt_attention_mask,
                 max_new_tokens=config.generation_max_new_tokens,
                 do_sample=False,
+                temperature=None,
+                top_p=None,
+                top_k=None,
                 pad_token_id=pad_token_id,
                 eos_token_id=eos_token_ids,
             )
+            generation_bar.update(len(batch))
             input_ids = generated_ids.to(wrapper.device)
             if config.max_tokens is not None:
                 input_ids = input_ids[:, : config.max_tokens]
@@ -238,15 +266,16 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
                 pad_token_id=pad_token_id,
                 device=wrapper.device,
             )
-            with timed_section(timings, "prefill", wrapper.device):
-                outputs = wrapper.model(
+            with timed_section(timings, "hidden_extraction", wrapper.device):
+                outputs = _backbone(wrapper.model)(
                     input_ids=padded_ids,
                     attention_mask=attention_mask,
-                    use_cache=True,
+                    use_cache=False,
                     output_hidden_states=True,
                     return_dict=True,
-            )
+                )
             final_hidden = outputs.hidden_states[-1]
+            hidden_bar.update(len(trimmed_sequences))
             kept_row_idx = 0
             for row_idx, (start, end) in enumerate(spans):
                 length = end - start
@@ -277,6 +306,8 @@ def collect_teacher_dataset(config: TeacherCollectionConfig) -> tuple[Dataset, T
                     }
                 )
                 kept_row_idx += 1
+        generation_bar.close()
+        hidden_bar.close()
 
     with timed_section(timings, "dataset_build"):
         dataset = Dataset.from_list(rows, features=teacher_dataset_features())

@@ -19,4 +19,6 @@ def test_smoke_gsm8k_collection_yaml_parses():
     assert args.limit == 10
     assert args.local_files_only is True
     assert args.device is None
+    assert args.dtype is None
+    assert args.seed == 0
     assert args.output_dir == Path("teacher_states/gsm8k-qwen35-08b-smoke")
