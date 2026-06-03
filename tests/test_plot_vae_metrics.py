@@ -13,16 +13,16 @@ def load_script_module():
     return module
 
 
-def test_metric_series_extracts_numeric_step_metrics():
+def test_metric_series_extracts_loss_metrics_only():
     module = load_script_module()
     series = module.metric_series(
         [
-            {"step": 1, "loss": 3.0, "epoch": 0.1},
-            {"step": 2, "eval_loss": 2.0, "train_runtime": 10.0},
+            {"step": 1, "loss": 3.0, "hidden.mse": 4.0, "token.match": 0.5, "epoch": 0.1},
+            {"step": 2, "eval_loss": 2.0, "eval_samples_per_second": 10.0, "train_runtime": 10.0},
         ]
     )
 
-    assert series == {"loss": ([1], [3.0]), "eval_loss": ([2], [2.0])}
+    assert series == {"loss": ([1], [3.0]), "hidden.mse": ([1], [4.0]), "eval_loss": ([2], [2.0])}
 
 
 def test_load_log_history_reads_trainer_state(tmp_path):

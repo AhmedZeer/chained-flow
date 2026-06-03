@@ -13,7 +13,28 @@ IGNORED_KEYS = {
     "train_runtime",
     "train_samples_per_second",
     "train_steps_per_second",
+    "eval_runtime",
+    "eval_samples_per_second",
+    "eval_steps_per_second",
 }
+
+LOSS_COMPONENT_NAMES = {
+    "hidden.mse",
+    "hidden.cos",
+    "hidden.norm",
+    "latent.kl",
+    "logit.kl",
+}
+
+
+def is_loss_metric(name: str) -> bool:
+    normalized = name.removeprefix("eval_")
+    return (
+        normalized == "loss"
+        or normalized.endswith("_loss")
+        or normalized in LOSS_COMPONENT_NAMES
+        or normalized.startswith("loss_component/")
+    )
 
 
 def load_log_history(output_dir: str | Path) -> list[dict[str, Any]]:
@@ -32,7 +53,7 @@ def metric_series(log_history: list[dict[str, Any]]) -> dict[str, tuple[list[int
         if step is None:
             continue
         for name, value in entry.items():
-            if name in IGNORED_KEYS or not isinstance(value, int | float):
+            if name in IGNORED_KEYS or not is_loss_metric(name) or not isinstance(value, int | float):
                 continue
             steps, values = series.setdefault(name, ([], []))
             steps.append(int(step))
