@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import random
 from typing import Any
 
-from datasets import Dataset, load_from_disk
+from datasets import Dataset, load_dataset, load_from_disk
 import torch
 from torch.utils.data import Dataset as TorchDataset
 
@@ -43,6 +44,26 @@ class TeacherWindowDataset(TorchDataset):
         self.windows_per_epoch = windows_per_epoch or sum(max_t - min_t + 1 for _, min_t, max_t in self.valid_rows)
 
     @classmethod
+    def from_path(
+        cls,
+        path: str,
+        *,
+        split: str = "train",
+        context_size: int,
+        draft_length: int,
+        windows_per_epoch: int | None = None,
+        seed: int = 0,
+    ) -> "TeacherWindowDataset":
+        dataset = load_from_disk(path) if Path(path).exists() else load_dataset(path, split=split)
+        return cls(
+            dataset,
+            context_size=context_size,
+            draft_length=draft_length,
+            windows_per_epoch=windows_per_epoch,
+            seed=seed,
+        )
+
+    @classmethod
     def from_disk(
         cls,
         path: str,
@@ -52,8 +73,8 @@ class TeacherWindowDataset(TorchDataset):
         windows_per_epoch: int | None = None,
         seed: int = 0,
     ) -> "TeacherWindowDataset":
-        return cls(
-            load_from_disk(path),
+        return cls.from_path(
+            path,
             context_size=context_size,
             draft_length=draft_length,
             windows_per_epoch=windows_per_epoch,

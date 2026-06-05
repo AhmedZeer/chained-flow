@@ -26,7 +26,7 @@ def test_smoke_vae_yaml_parses():
         )
     )
     model_args, data_args, loss_args, training_args = parser.parse_yaml_file(
-        yaml_file=str(Path("train_configs/smoke_vae.yaml").resolve())
+        yaml_file=str(Path("train_configs/vae/smoke_vae.yaml").resolve())
     )
 
     assert model_args.vae_type == "residual_mlp"

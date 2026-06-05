@@ -1,6 +1,7 @@
 from datasets import Dataset
 import torch
 
+from chained_flow.training import window_dataset
 from chained_flow.training.window_dataset import TeacherWindowDataset
 
 
@@ -77,3 +78,41 @@ def test_teacher_window_dataset_samples_response_side_only():
     for index in range(len(windows)):
         sample = windows[index]
         assert int(sample["future_tokens"][0].item()) >= 4
+
+
+def test_teacher_window_dataset_loads_hf_dataset_when_path_is_not_local(monkeypatch):
+    dataset = Dataset.from_list(
+        [
+            {
+                "text": "x",
+                "input_ids": [0, 1, 2],
+                "final_hidden": [[0.0], [1.0], [2.0]],
+                "example_id": "0",
+                "source": "test",
+                "split": "train",
+                "format_name": "test",
+                "model_id": "fake",
+                "hidden_dtype": "float32",
+                "num_tokens": 3,
+                "prompt_length": 1,
+            }
+        ]
+    )
+    calls = {}
+
+    def fake_load_dataset(path, *, split):
+        calls["path"] = path
+        calls["split"] = split
+        return dataset
+
+    monkeypatch.setattr(window_dataset, "load_dataset", fake_load_dataset)
+    windows = TeacherWindowDataset.from_path(
+        "user/repo",
+        split="train",
+        context_size=2,
+        draft_length=1,
+        windows_per_epoch=1,
+    )
+
+    assert calls == {"path": "user/repo", "split": "train"}
+    assert len(windows) == 1

@@ -142,7 +142,7 @@ UV_CACHE_DIR=.uv-cache uv run python scripts/train_hidden_mlp.py train_configs/s
 Hidden VAE smoke training:
 
 ```bash
-UV_CACHE_DIR=.uv-cache uv run python scripts/train_vae.py train_configs/vae/smoke_vae.yaml
+UV_CACHE_DIR=.uv-cache uv run python scripts/train_vae.py train_configs/smoke_vae.yaml
 ```
 
 GSM8K collection is prompt-only: the script asks the frozen model to generate
