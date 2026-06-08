@@ -25,6 +25,7 @@ dataset_path: sghosts/cf_gsm8k_6.5k_train
 dataset_split: train
 windows_per_epoch:
 window_seed: 0
+materialize_rows: true
 output_dir: out/flow/ckpts/chunked-flow-k2-gsm8k-6.5k-ffn_multiplier-12
 
 per_device_train_batch_size: 256

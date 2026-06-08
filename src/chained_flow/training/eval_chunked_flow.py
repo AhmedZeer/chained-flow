@@ -39,6 +39,7 @@ class ChunkedFlowEvalArguments:
     max_batches: int | None = None
     windows_per_epoch: int | None = None
     window_seed: int = 0
+    materialize_rows: bool = True
     local_files_only: bool = False
     output_path: str | None = None
     eval_all_checkpoints: bool = False
@@ -190,6 +191,7 @@ def load_flow_eval_dataloader(
         draft_length=draft_length,
         windows_per_epoch=args.windows_per_epoch,
         seed=args.window_seed,
+        materialize_rows=args.materialize_rows,
     )
     dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_teacher_windows)
     print(

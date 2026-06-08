@@ -39,6 +39,7 @@ class TeacherDataArguments:
     dataset_split: str = "train"
     windows_per_epoch: int | None = None
     window_seed: int = 0
+    materialize_rows: bool = True
 
 
 @dataclass
@@ -243,11 +244,13 @@ def train_chunked_flow_with_trainer(
         draft_length=model_args.draft_length,
         windows_per_epoch=data_args.windows_per_epoch,
         seed=data_args.window_seed,
+        materialize_rows=data_args.materialize_rows,
     )
     print(
         f"flow dataset initialized: windows_per_epoch={len(dataset)} "
         f"available_windows={dataset.available_windows} rows={len(dataset.dataset)} "
-        f"valid_rows={len(dataset.valid_rows)} window_seed={data_args.window_seed}",
+        f"valid_rows={len(dataset.valid_rows)} window_seed={data_args.window_seed} "
+        f"materialize_rows={data_args.materialize_rows}",
         flush=True,
     )
 

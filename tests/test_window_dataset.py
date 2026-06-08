@@ -30,6 +30,7 @@ def test_teacher_window_dataset_derives_dynamic_training_fields():
     assert sample["target_hidden"].shape == (2, 2)
     assert sample["future_tokens"].shape == (2,)
     assert windows.available_windows == 2
+    assert windows.row_tensors is not None
 
 
 def test_teacher_window_dataset_pads_short_left_context():
@@ -117,3 +118,36 @@ def test_teacher_window_dataset_loads_hf_dataset_when_path_is_not_local(monkeypa
 
     assert calls == {"path": "user/repo", "split": "train"}
     assert len(windows) == 1
+
+
+def test_teacher_window_dataset_can_skip_row_materialization():
+    dataset = Dataset.from_list(
+        [
+            {
+                "text": "x",
+                "input_ids": [0, 1, 2],
+                "final_hidden": [[0.0], [1.0], [2.0]],
+                "example_id": "0",
+                "source": "test",
+                "split": "train",
+                "format_name": "test",
+                "model_id": "fake",
+                "hidden_dtype": "float32",
+                "num_tokens": 3,
+                "prompt_length": 1,
+            }
+        ]
+    )
+    windows = TeacherWindowDataset(
+        dataset,
+        context_size=2,
+        draft_length=1,
+        windows_per_epoch=1,
+        materialize_rows=False,
+    )
+
+    sample = windows[0]
+
+    assert windows.row_tensors is None
+    assert sample["context_hidden"].shape == (2, 1)
+

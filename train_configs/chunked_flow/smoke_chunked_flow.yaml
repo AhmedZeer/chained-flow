@@ -16,6 +16,7 @@ dataset_path: teacher_states/gsm8k-qwen35-08b-smoke
 dataset_split: train
 windows_per_epoch: 32
 window_seed: 0
+materialize_rows: true
 output_dir: out/flow/ckpts/smoke-chunked-flow-k2
 
 lambda_flow: 1.0
