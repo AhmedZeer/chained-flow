@@ -11,6 +11,7 @@ from chained_flow.training.eval_vae import (
     logit_kl_divergence,
     per_token_logit_kl_divergence,
     per_token_vae_metrics,
+    select_checkpoint_stride,
     summarize_metric,
     torch_dtype_from_string,
 )
@@ -149,3 +150,16 @@ def test_single_eval_output_path_includes_dataset_name(tmp_path):
 
     args.output_path = str(tmp_path / "metrics.json")
     assert single_eval_output_path(args) == tmp_path / "metrics_sghosts_cf_gsm8k_1k_test.json"
+
+def test_select_checkpoint_stride_keeps_every_nth_vae_checkpoint(tmp_path):
+    checkpoints = [tmp_path / f"checkpoint-{step}" for step in [0, 5, 10, 15, 20]]
+
+    selected = select_checkpoint_stride(checkpoints, stride=2)
+
+    assert [path.name for path in selected] == ["checkpoint-0", "checkpoint-10", "checkpoint-20"]
+
+
+def test_select_checkpoint_stride_rejects_non_positive_vae_stride(tmp_path):
+    with pytest.raises(ValueError, match="checkpoint_stride"):
+        select_checkpoint_stride([tmp_path / "checkpoint-0"], stride=0)
+

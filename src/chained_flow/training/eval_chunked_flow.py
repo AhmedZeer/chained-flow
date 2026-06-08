@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 import re
 from pathlib import Path
+import time
 from typing import Any
 
 import torch
@@ -12,6 +13,8 @@ from torch.utils.data import DataLoader
 
 from chained_flow.context import ChainedFlowContext
 from chained_flow.frozen_lm import DEFAULT_MODEL_ID
+from chained_flow.generation import generate_with_drafter
+from chained_flow.timing import synchronize_if_needed
 from chained_flow.training.collators import collate_teacher_windows
 from chained_flow.training.train_chunked_flow import (
     ChunkedFlowModelArguments,
@@ -43,7 +46,12 @@ class ChunkedFlowEvalArguments:
     local_files_only: bool = False
     output_path: str | None = None
     eval_all_checkpoints: bool = False
+    checkpoint_stride: int = 1
     noise_seed: int = 0
+    measure_speedup: bool = False
+    speedup_num_prompts: int = 16
+    speedup_warmup_prompts: int = 2
+    speedup_max_new_tokens: int = 32
 
 
 def torch_dtype_from_string(dtype: str | None) -> torch.dtype | None:
@@ -77,6 +85,19 @@ def summarize_metric(values: torch.Tensor) -> dict[str, float]:
     }
 
 
+def summarize_scalar_metric(value: float) -> dict[str, float]:
+    return {
+        "mean": float(value),
+        "std": 0.0,
+        "min": float(value),
+        "max": float(value),
+        "p50": float(value),
+        "p90": float(value),
+        "p95": float(value),
+        "p99": float(value),
+    }
+
+
 def dataset_eval_slug(dataset_path: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", dataset_path).strip("._-")
     return slug or "dataset"
@@ -104,6 +125,12 @@ def discover_flow_checkpoints(run_dir: str | Path) -> list[Path]:
     if not checkpoints:
         raise FileNotFoundError(f"no flow checkpoints found in {run_dir}")
     return checkpoints
+
+
+def select_checkpoint_stride(checkpoints: list[Path], *, stride: int = 1) -> list[Path]:
+    if stride < 1:
+        raise ValueError("checkpoint_stride must be >= 1")
+    return checkpoints[::stride]
 
 
 def find_flow_config_dir(flow_dir: str | Path) -> Path:
@@ -292,6 +319,174 @@ def per_token_flow_metrics(
     return metrics
 
 
+def _slice_row_prompt(dataset: Any, row_idx: int, end: int) -> torch.Tensor:
+    if hasattr(dataset, "row_offsets") and hasattr(dataset, "input_ids"):
+        offset = int(dataset.row_offsets[row_idx].item())
+        length = int(dataset.row_lengths[row_idx].item())
+        row_input_ids = dataset.input_ids[offset : offset + length]
+        return row_input_ids[:end].long().unsqueeze(0)
+
+    row_tensors = getattr(dataset, "row_tensors", None)
+    if row_tensors is not None:
+        input_ids, _ = row_tensors[row_idx]
+        return input_ids[:end].long().unsqueeze(0)
+
+    hf_dataset = getattr(dataset, "dataset", None)
+    if hf_dataset is not None:
+        row = hf_dataset[row_idx]
+        return torch.as_tensor(row["input_ids"], dtype=torch.long)[:end].unsqueeze(0)
+
+    raise TypeError("speedup measurement requires a TeacherWindowDataset or FlowWindowCacheDataset")
+
+
+def collect_speedup_prompts(dataset: Any, *, num_prompts: int, warmup_prompts: int) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    total = max(0, num_prompts) + max(0, warmup_prompts)
+    prompts: list[torch.Tensor] = []
+    seen: set[tuple[int, int]] = set()
+    index = 0
+    max_attempts = max(total * 20, total + 100)
+    while len(prompts) < total and index < max_attempts:
+        row_idx, t = dataset._sample_row_and_t(index)
+        key = (int(row_idx), int(t))
+        index += 1
+        if key in seen:
+            continue
+        seen.add(key)
+        prompt = _slice_row_prompt(dataset, int(row_idx), int(t) + 1)
+        if prompt.numel() > 0:
+            prompts.append(prompt.contiguous())
+    if len(prompts) < total:
+        raise ValueError(f"could only collect {len(prompts)} speedup prompts; requested {total}")
+    return prompts[:warmup_prompts], prompts[warmup_prompts:]
+
+
+@torch.inference_mode()
+def generate_greedy_baseline(frozen_lm, prompt: torch.Tensor, *, max_new_tokens: int) -> dict[str, float]:
+    synchronize_if_needed(frozen_lm.device)
+    start = time.perf_counter()
+    input_ids = prompt.to(frozen_lm.device)
+    state, prefill_timings = frozen_lm.prefill(input_ids)
+    decode_seconds = 0.0
+    generated = 0
+    eos_token_id = frozen_lm.eos_token_id
+    while generated < max_new_tokens:
+        token, next_timings = frozen_lm.next_token(state)
+        state, forward_timings = frozen_lm.forward_with_cache(token, state, use_cache=True)
+        decode_seconds += next_timings.get("next_token") + forward_timings.get("forward_with_cache")
+        generated += 1
+        if eos_token_id is not None and int(token.item()) == int(eos_token_id):
+            break
+    synchronize_if_needed(frozen_lm.device)
+    seconds = time.perf_counter() - start
+    return {
+        "seconds": seconds,
+        "prefill_seconds": prefill_timings.get("prefill"),
+        "decode_seconds": decode_seconds,
+        "generated_tokens": float(generated),
+        "tokens_per_second": float(generated / seconds) if seconds > 0 else 0.0,
+        "decode_tokens_per_second": float(generated / decode_seconds) if decode_seconds > 0 else 0.0,
+    }
+
+
+@torch.inference_mode()
+def measure_generation_speedup(
+    args: ChunkedFlowEvalArguments,
+    *,
+    module: SingleExpertFlowTrainingModule,
+    frozen_lm,
+    dataloader: DataLoader,
+) -> dict[str, Any]:
+    if args.speedup_num_prompts < 1:
+        raise ValueError("speedup_num_prompts must be >= 1 when measure_speedup is enabled")
+    if args.speedup_max_new_tokens < 1:
+        raise ValueError("speedup_max_new_tokens must be >= 1 when measure_speedup is enabled")
+
+    warmup_prompts, prompts = collect_speedup_prompts(
+        dataloader.dataset,
+        num_prompts=args.speedup_num_prompts,
+        warmup_prompts=args.speedup_warmup_prompts,
+    )
+    draft_len = module.drafter.config.draft_length
+    print(
+        f"measuring real flow speedup: prompts={len(prompts)} warmup={len(warmup_prompts)} "
+        f"max_new_tokens={args.speedup_max_new_tokens} draft_len={draft_len}",
+        flush=True,
+    )
+
+    for prompt in warmup_prompts:
+        generate_greedy_baseline(frozen_lm, prompt, max_new_tokens=args.speedup_max_new_tokens)
+        generate_with_drafter(
+            ChainedFlowContext(frozen_lm),
+            module.drafter,
+            prompt,
+            max_new_tokens=args.speedup_max_new_tokens,
+            draft_len=draft_len,
+        )
+
+    baseline_seconds = 0.0
+    baseline_decode_seconds = 0.0
+    baseline_tokens = 0.0
+    flow_seconds = 0.0
+    flow_decode_seconds = 0.0
+    flow_tokens = 0.0
+    accepted_total = 0.0
+    drafted_total = 0.0
+    step_count = 0
+    iterator = prompts
+    if tqdm is not None:
+        iterator = tqdm(prompts, total=len(prompts), desc="measuring speedup", unit="prompt")
+    for prompt in iterator:
+        baseline = generate_greedy_baseline(frozen_lm, prompt, max_new_tokens=args.speedup_max_new_tokens)
+        baseline_seconds += baseline["seconds"]
+        baseline_decode_seconds += baseline["decode_seconds"]
+        baseline_tokens += baseline["generated_tokens"]
+
+        flow = generate_with_drafter(
+            ChainedFlowContext(frozen_lm),
+            module.drafter,
+            prompt,
+            max_new_tokens=args.speedup_max_new_tokens,
+            draft_len=draft_len,
+        )
+        flow_time = flow.timings.get("total_generation")
+        flow_prefill_time = flow.timings.get("prefill")
+        flow_seconds += flow_time
+        flow_decode_seconds += max(0.0, flow_time - flow_prefill_time)
+        flow_tokens += float(flow.generated_token_count)
+        for step in flow.step_stats:
+            accepted_total += float(step.accepted_len)
+            drafted_total += float(step.draft_len)
+            step_count += 1
+
+    baseline_tps = baseline_tokens / baseline_seconds if baseline_seconds > 0 else 0.0
+    flow_tps = flow_tokens / flow_seconds if flow_seconds > 0 else 0.0
+    baseline_decode_tps = baseline_tokens / baseline_decode_seconds if baseline_decode_seconds > 0 else 0.0
+    flow_decode_tps = flow_tokens / flow_decode_seconds if flow_decode_seconds > 0 else 0.0
+    mean_accept = accepted_total / step_count if step_count > 0 else 0.0
+    mean_draft = drafted_total / step_count if step_count > 0 else 0.0
+    return {
+        "real": flow_tps / baseline_tps if baseline_tps > 0 else 0.0,
+        "decode_only": flow_decode_tps / baseline_decode_tps if baseline_decode_tps > 0 else 0.0,
+        "acceptance_proxy": 1.0 + mean_accept,
+        "baseline_tokens_per_second": baseline_tps,
+        "flow_tokens_per_second": flow_tps,
+        "baseline_decode_tokens_per_second": baseline_decode_tps,
+        "flow_decode_tokens_per_second": flow_decode_tps,
+        "baseline_seconds": baseline_seconds,
+        "flow_seconds": flow_seconds,
+        "baseline_decode_seconds": baseline_decode_seconds,
+        "flow_decode_seconds": flow_decode_seconds,
+        "baseline_generated_tokens": int(baseline_tokens),
+        "flow_generated_tokens": int(flow_tokens),
+        "num_prompts": len(prompts),
+        "warmup_prompts": len(warmup_prompts),
+        "max_new_tokens": args.speedup_max_new_tokens,
+        "mean_accept_len": mean_accept,
+        "mean_draft_len": mean_draft,
+        "draft_steps": step_count,
+    }
+
+
 @torch.inference_mode()
 def evaluate_flow_checkpoint(
     args: ChunkedFlowEvalArguments,
@@ -356,6 +551,18 @@ def evaluate_flow_checkpoint(
             metric_values.setdefault(name, []).append(value.detach().cpu())
 
     metrics = {name: summarize_metric(torch.cat(values, dim=0)) for name, values in metric_values.items()}
+    speedup: dict[str, Any] | None = None
+    if args.measure_speedup:
+        speedup = measure_generation_speedup(
+            args,
+            module=module,
+            frozen_lm=frozen_lm,
+            dataloader=dataloader,
+        )
+        for name, value in speedup.items():
+            if isinstance(value, (int, float)):
+                metrics[f"speedup.{name}"] = summarize_scalar_metric(float(value))
+
     result = {
         "flow_dir": str(flow_dir),
         "checkpoint": flow_dir.name,
@@ -368,6 +575,8 @@ def evaluate_flow_checkpoint(
         "config": config,
         "metrics": metrics,
     }
+    if speedup is not None:
+        result["speedup"] = speedup
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
@@ -416,10 +625,15 @@ def evaluate_flow(args: ChunkedFlowEvalArguments) -> dict[str, Any] | list[dict[
     if run_dir.name.startswith("checkpoint-"):
         run_dir = run_dir.parent
     checkpoints = discover_flow_checkpoints(run_dir)
-    print(f"found {len(checkpoints)} flow checkpoints in {run_dir}", flush=True)
+    selected_checkpoints = select_checkpoint_stride(checkpoints, stride=args.checkpoint_stride)
+    print(
+        f"found {len(checkpoints)} flow checkpoints in {run_dir}; "
+        f"selected {len(selected_checkpoints)} with checkpoint_stride={args.checkpoint_stride}",
+        flush=True,
+    )
 
     results = []
-    for checkpoint_dir in checkpoints:
+    for checkpoint_dir in selected_checkpoints:
         output_path = checkpoint_eval_output_path(args, checkpoint_dir, run_dir=run_dir)
         results.append(
             evaluate_flow_checkpoint(
@@ -444,8 +658,11 @@ __all__ = [
     "find_flow_config_dir",
     "load_flow_eval_dataloader",
     "load_flow_training_module",
+    "measure_generation_speedup",
     "per_token_flow_metrics",
+    "select_checkpoint_stride",
     "single_eval_output_path",
     "summarize_metric",
+    "summarize_scalar_metric",
     "torch_dtype_from_string",
 ]

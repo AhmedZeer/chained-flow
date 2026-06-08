@@ -246,9 +246,12 @@ def train_chunked_flow_with_trainer(
         seed=data_args.window_seed,
         materialize_rows=data_args.materialize_rows,
     )
+    dataset_rows = getattr(dataset, "num_rows", None)
+    if dataset_rows is None:
+        dataset_rows = len(dataset.dataset)
     print(
         f"flow dataset initialized: windows_per_epoch={len(dataset)} "
-        f"available_windows={dataset.available_windows} rows={len(dataset.dataset)} "
+        f"available_windows={dataset.available_windows} rows={dataset_rows} "
         f"valid_rows={len(dataset.valid_rows)} window_seed={data_args.window_seed} "
         f"materialize_rows={data_args.materialize_rows}",
         flush=True,

@@ -9,10 +9,12 @@ wheels/
 # data
 teacher_states/
 out/
+data/
 
 # Virtual environments
 .venv/
 .env
+.ipynb_checkpoints/
 
 # Hugging Face cache/downloads
 hf_home/

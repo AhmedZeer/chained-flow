@@ -34,6 +34,7 @@ class VAEEvalArguments:
     local_files_only: bool = False
     output_path: str | None = None
     eval_all_checkpoints: bool = False
+    checkpoint_stride: int = 1
 
 
 def torch_dtype_from_string(dtype: str | None) -> torch.dtype | None:
@@ -156,6 +157,12 @@ def discover_vae_checkpoints(run_dir: str | Path) -> list[Path]:
     if not checkpoints:
         raise FileNotFoundError(f"no VAE checkpoints found in {run_dir}")
     return checkpoints
+
+
+def select_checkpoint_stride(checkpoints: list[Path], *, stride: int = 1) -> list[Path]:
+    if stride < 1:
+        raise ValueError("checkpoint_stride must be >= 1")
+    return checkpoints[::stride]
 
 
 def dataset_eval_slug(dataset_path: str) -> str:
@@ -398,10 +405,15 @@ def evaluate_vae(args: VAEEvalArguments) -> dict[str, Any] | list[dict[str, Any]
     if run_dir.name.startswith("checkpoint-"):
         run_dir = run_dir.parent
     checkpoints = discover_vae_checkpoints(run_dir)
-    print(f"found {len(checkpoints)} VAE checkpoints in {run_dir}", flush=True)
+    selected_checkpoints = select_checkpoint_stride(checkpoints, stride=args.checkpoint_stride)
+    print(
+        f"found {len(checkpoints)} VAE checkpoints in {run_dir}; "
+        f"selected {len(selected_checkpoints)} with checkpoint_stride={args.checkpoint_stride}",
+        flush=True,
+    )
 
     results = []
-    for checkpoint_dir in checkpoints:
+    for checkpoint_dir in selected_checkpoints:
         output_path = checkpoint_eval_output_path(args, checkpoint_dir, run_dir=run_dir)
         results.append(
             evaluate_vae_checkpoint(
@@ -428,6 +440,7 @@ __all__ = [
     "load_vae_eval_dataloader",
     "load_vae_training_module",
     "single_eval_output_path",
+    "select_checkpoint_stride",
     "logit_kl_divergence",
     "per_token_logit_kl_divergence",
     "per_token_vae_metrics",

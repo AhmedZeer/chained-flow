@@ -11,6 +11,7 @@ from chained_flow.training.eval_chunked_flow import (
     find_flow_config_dir,
     load_flow_training_module,
     per_token_flow_metrics,
+    select_checkpoint_stride,
     single_eval_output_path,
     summarize_metric,
     torch_dtype_from_string,
@@ -198,3 +199,16 @@ def test_load_flow_training_module_uses_parent_config_for_checkpoint(fake_wrappe
     assert isinstance(module, SingleExpertFlowTrainingModule)
     assert config["model_args"]["vae_dir"] == str(vae_dir)
     assert module.drafter.config.draft_length == 2
+
+def test_select_checkpoint_stride_keeps_every_nth_checkpoint(tmp_path):
+    checkpoints = [tmp_path / f"checkpoint-{step}" for step in [0, 5, 10, 15, 20]]
+
+    selected = select_checkpoint_stride(checkpoints, stride=2)
+
+    assert [path.name for path in selected] == ["checkpoint-0", "checkpoint-10", "checkpoint-20"]
+
+
+def test_select_checkpoint_stride_rejects_non_positive_stride(tmp_path):
+    with pytest.raises(ValueError, match="checkpoint_stride"):
+        select_checkpoint_stride([tmp_path / "checkpoint-0"], stride=0)
+

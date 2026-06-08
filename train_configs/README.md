@@ -25,3 +25,22 @@ Flow configs use the same YAML entrypoint style as the VAE trainer:
 ```bash
 uv run python scripts/train_chunked_flow.py train_configs/chunked_flow/chunked_flow_k2_gsm8k_6.5k.yaml
 ```
+
+## Flow Dataset Cache
+
+For repeated flow runs, preprocess teacher states once into a tensor cache:
+
+```bash
+uv run python scripts/preprocess_flow_dataset.py \
+  --dataset-path sghosts/cf_gsm8k_6.5k_train \
+  --dataset-split train \
+  --output-dir data/flow_cache/gsm8k_6.5k_train
+```
+
+Then train against the cached config:
+
+```bash
+uv run python scripts/train_chunked_flow.py train_configs/chunked_flow/chunked_flow_k2_gsm8k_6.5k_cached.yaml
+```
+
+The cache stores each sequence once as flat tensors and samples training windows by slicing, avoiding repeated Hugging Face row decoding.

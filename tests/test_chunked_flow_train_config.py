@@ -70,7 +70,7 @@ def test_chunked_flow_sweep_yaml_configs_parse_and_use_unique_outputs():
         )
         assert model_args.draft_length == 2
         assert model_args.chunk_size == 2
-        assert data_args.dataset_path == "sghosts/cf_gsm8k_6.5k_train"
+        assert data_args.dataset_path == "data/flow_cache/gsm8k_6.5k_train"
         assert data_args.materialize_rows is True
         assert loss_args.gamma == 0.8
         output_dirs.append(training_args.output_dir)
