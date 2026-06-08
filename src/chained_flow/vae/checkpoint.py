@@ -27,6 +27,15 @@ def _strip_vae_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Te
     return state_dict
 
 
+def _find_config_dir(checkpoint_dir: Path) -> Path:
+    for candidate in (checkpoint_dir, checkpoint_dir.parent):
+        if (candidate / "chained_flow_vae_config.json").exists():
+            return candidate
+    raise FileNotFoundError(
+        f"missing VAE config in {checkpoint_dir} or {checkpoint_dir.parent}"
+    )
+
+
 def load_hidden_vae_from_dir(
     checkpoint_dir: str | Path,
     *,
@@ -34,9 +43,8 @@ def load_hidden_vae_from_dir(
     freeze: bool = True,
 ) -> HiddenVAE:
     checkpoint_dir = Path(checkpoint_dir)
-    config_path = checkpoint_dir / "chained_flow_vae_config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"missing VAE config: {config_path}")
+    config_dir = _find_config_dir(checkpoint_dir)
+    config_path = config_dir / "chained_flow_vae_config.json"
     with config_path.open("r", encoding="utf-8") as f:
         saved_config = json.load(f)
 

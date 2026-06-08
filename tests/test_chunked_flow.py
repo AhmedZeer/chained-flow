@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from chained_flow.drafters.chunked_flow import CrossAttentionFlowExpert, SingleExpertFlowConfig, SingleExpertFlowDrafter
-from chained_flow.training.train_chunked_flow import FlowLossArguments, SingleExpertFlowTrainingModule
+from chained_flow.training.train_chunked_flow import FlowLossArguments, SingleExpertFlowTrainingModule, _parameter_counts
 from chained_flow.vae import HiddenVAEConfig, build_hidden_vae
 
 
@@ -87,6 +87,20 @@ def test_single_expert_flow_drafter_predicts_and_proposes(fake_wrapper, tmp_path
     assert all(not parameter.requires_grad for parameter in drafter.vae.parameters())
 
 
+
+def test_single_expert_flow_drafter_loads_trainer_checkpoint_with_parent_config(fake_wrapper, tmp_path):
+    run_dir = tmp_path / "vae-run"
+    checkpoint_dir = run_dir / "checkpoint-10"
+    write_vae_checkpoint(run_dir, hidden_size=fake_wrapper.model.config.hidden_size)
+    checkpoint_dir.mkdir()
+    (run_dir / "pytorch_model.bin").replace(checkpoint_dir / "pytorch_model.bin")
+
+    drafter = SingleExpertFlowDrafter(fake_wrapper, flow_config(checkpoint_dir))
+
+    assert drafter.vae.config.hidden_size == fake_wrapper.model.config.hidden_size
+    assert all(not parameter.requires_grad for parameter in drafter.vae.parameters())
+
+
 def test_single_expert_flow_training_module_returns_finite_loss_and_gradients(fake_wrapper, tmp_path):
     vae_dir = tmp_path / "vae"
     write_vae_checkpoint(vae_dir, hidden_size=fake_wrapper.model.config.hidden_size)
@@ -137,3 +151,36 @@ def test_lm_head_buffers_are_not_persistent(fake_wrapper, tmp_path):
     assert "lm_head_weight" not in state_keys
     assert all(not key.startswith("lm_head") for key in state_keys)
     assert all(".vae." not in key for key in state_keys)
+
+
+def test_flow_training_lm_head_accepts_float_hidden_with_bfloat16_head(fake_wrapper, tmp_path):
+    vae_dir = tmp_path / "vae"
+    write_vae_checkpoint(vae_dir, hidden_size=fake_wrapper.model.config.hidden_size)
+    module = SingleExpertFlowTrainingModule(
+        fake_wrapper,
+        flow_config(vae_dir, context_size=2),
+        FlowLossArguments(),
+    )
+    module.lm_head_weight = module.lm_head_weight.to(torch.bfloat16)
+    hidden = torch.randn(2, 2, fake_wrapper.model.config.hidden_size, dtype=torch.float32)
+
+    logits = module.lm_head(hidden)
+
+    assert logits.dtype == torch.bfloat16
+    assert logits.shape == (2, 2, fake_wrapper.model.config.hidden_size)
+
+def test_parameter_counts_reports_total_and_trainable(fake_wrapper, tmp_path):
+    vae_dir = tmp_path / "vae"
+    write_vae_checkpoint(vae_dir, hidden_size=fake_wrapper.model.config.hidden_size)
+    module = SingleExpertFlowTrainingModule(
+        fake_wrapper,
+        flow_config(vae_dir, context_size=2),
+        FlowLossArguments(),
+    )
+
+    total, trainable = _parameter_counts(module)
+
+    assert total > 0
+    assert trainable > 0
+    assert trainable < total
+

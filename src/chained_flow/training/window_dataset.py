@@ -9,6 +9,11 @@ from datasets import Dataset, load_dataset, load_from_disk
 import torch
 from torch.utils.data import Dataset as TorchDataset
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - tqdm is normally present through datasets/transformers.
+    tqdm = None
+
 
 @dataclass(frozen=True)
 class TeacherWindow:
@@ -32,16 +37,33 @@ class TeacherWindowDataset(TorchDataset):
         self.draft_length = draft_length
         self.seed = seed
         self.valid_rows: list[tuple[int, int, int]] = []
-        for row_idx, row in enumerate(dataset):
-            length = int(row["num_tokens"])
-            prompt_length = int(row.get("prompt_length", 1))
+        print("formatting flow dataset: scanning teacher-window rows", flush=True)
+        lengths = dataset["num_tokens"]
+        prompt_lengths = dataset["prompt_length"] if "prompt_length" in dataset.column_names else None
+        iterator = enumerate(lengths)
+        if tqdm is not None:
+            iterator = tqdm(
+                iterator,
+                total=len(lengths),
+                desc="scanning flow rows",
+                unit="row",
+            )
+        for row_idx, length_value in iterator:
+            length = int(length_value)
+            prompt_length = int(prompt_lengths[row_idx]) if prompt_lengths is not None else 1
             min_t = max(0, prompt_length - 1)
             max_t = length - draft_length - 1
             if max_t >= min_t:
                 self.valid_rows.append((row_idx, min_t, max_t))
         if not self.valid_rows:
             raise ValueError("dataset contains no response-side rows long enough for the requested draft_length")
-        self.windows_per_epoch = windows_per_epoch or sum(max_t - min_t + 1 for _, min_t, max_t in self.valid_rows)
+        self.available_windows = sum(max_t - min_t + 1 for _, min_t, max_t in self.valid_rows)
+        self.windows_per_epoch = windows_per_epoch or self.available_windows
+        print(
+            f"flow dataset formatted: valid_rows={len(self.valid_rows)} "
+            f"available_windows={self.available_windows} windows_per_epoch={self.windows_per_epoch}",
+            flush=True,
+        )
 
     @classmethod
     def from_path(
@@ -54,7 +76,13 @@ class TeacherWindowDataset(TorchDataset):
         windows_per_epoch: int | None = None,
         seed: int = 0,
     ) -> "TeacherWindowDataset":
-        dataset = load_from_disk(path) if Path(path).exists() else load_dataset(path, split=split)
+        if Path(path).exists():
+            print(f"loading flow dataset from disk: {path}", flush=True)
+            dataset = load_from_disk(path)
+        else:
+            print(f"loading flow dataset from hub: {path} split={split}", flush=True)
+            dataset = load_dataset(path, split=split)
+        print(f"flow dataset source loaded: rows={len(dataset)} columns={dataset.column_names}", flush=True)
         return cls(
             dataset,
             context_size=context_size,

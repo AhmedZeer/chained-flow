@@ -150,6 +150,9 @@ class FrozenLMWrapper:
         )
 
     def lm_head(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        weight = getattr(self.model.lm_head, "weight", None)
+        if weight is not None:
+            hidden_states = hidden_states.to(dtype=weight.dtype)
         return self.model.lm_head(hidden_states)
 
     @staticmethod

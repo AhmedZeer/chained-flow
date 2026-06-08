@@ -1,3 +1,5 @@
+import torch
+
 from chained_flow.context import ChainedFlowContext
 from chained_flow.drafters.ar import ARDrafter
 from chained_flow.frozen_lm import FrozenLMWrapper
@@ -24,3 +26,14 @@ def test_components_share_wrapper_identity(fake_wrapper):
     verifier = SpeculativeVerifier(fake_wrapper)
     assert drafter.frozen_lm is fake_wrapper
     assert verifier.frozen_lm is fake_wrapper
+
+
+def test_frozen_lm_head_casts_hidden_to_head_dtype(fake_wrapper):
+    fake_wrapper.model.lm_head.weight.data = fake_wrapper.model.lm_head.weight.data.to(torch.bfloat16)
+    hidden = torch.randn(2, 3, fake_wrapper.model.config.hidden_size, dtype=torch.float32)
+
+    logits = fake_wrapper.lm_head(hidden)
+
+    assert logits.dtype == torch.bfloat16
+    assert logits.shape == (2, 3, fake_wrapper.model.config.hidden_size)
+

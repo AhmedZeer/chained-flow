@@ -87,6 +87,7 @@ class SingleExpertFlowTrainingModule(nn.Module):
         return super().load_state_dict(full_state, strict=strict, assign=assign)
 
     def lm_head(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states.to(dtype=self.lm_head_weight.dtype)
         logits = torch.matmul(hidden_states, self.lm_head_weight.t())
         if self.lm_head_bias is not None:
             logits = logits + self.lm_head_bias
@@ -205,6 +206,12 @@ def flow_config_from_args(args: ChunkedFlowModelArguments) -> SingleExpertFlowCo
     )
 
 
+def _parameter_counts(model: nn.Module) -> tuple[int, int]:
+    total = sum(parameter.numel() for parameter in model.parameters())
+    trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    return total, trainable
+
+
 def train_chunked_flow_with_trainer(
     model_args: ChunkedFlowModelArguments,
     data_args: TeacherDataArguments,
@@ -212,13 +219,23 @@ def train_chunked_flow_with_trainer(
     training_args: TrainingArguments,
 ) -> dict[str, Any]:
     torch.manual_seed(training_args.seed)
+    print(
+        f"loading flow backbone: model_id={model_args.model_id} "
+        f"device={model_args.device} local_files_only={model_args.local_files_only}",
+        flush=True,
+    )
     context = ChainedFlowContext.from_pretrained(
         model_args.model_id,
         device=model_args.device,
         local_files_only=model_args.local_files_only,
     )
     frozen_lm = context.frozen_lm
+    print(f"flow backbone loaded: device={frozen_lm.device}", flush=True)
 
+    print(
+        f"loading flow dataset: {data_args.dataset_path} split={data_args.dataset_split}",
+        flush=True,
+    )
     dataset = TeacherWindowDataset.from_path(
         data_args.dataset_path,
         split=data_args.dataset_split,
@@ -227,11 +244,42 @@ def train_chunked_flow_with_trainer(
         windows_per_epoch=data_args.windows_per_epoch,
         seed=data_args.window_seed,
     )
+    print(
+        f"flow dataset initialized: windows_per_epoch={len(dataset)} "
+        f"available_windows={dataset.available_windows} rows={len(dataset.dataset)} "
+        f"valid_rows={len(dataset.valid_rows)} window_seed={data_args.window_seed}",
+        flush=True,
+    )
 
+    print(
+        f"initializing flow drafter: context_size={model_args.context_size} "
+        f"draft_length={model_args.draft_length} chunk_size={model_args.chunk_size} "
+        f"expert_dim={model_args.expert_dim} num_heads={model_args.num_heads} "
+        f"ffn_multiplier={model_args.ffn_multiplier} num_flow_steps={model_args.num_flow_steps} "
+        f"noise_scale={model_args.noise_scale} vae_dir={model_args.vae_dir}",
+        flush=True,
+    )
     model = SingleExpertFlowTrainingModule(
         frozen_lm,
         flow_config_from_args(model_args),
         loss_args,
+    )
+    total_parameters, trainable_parameters = _parameter_counts(model)
+    print(
+        f"flow model initialized: parameters={total_parameters} "
+        f"trainable_parameters={trainable_parameters}",
+        flush=True,
+    )
+    model_device = next(model.parameters()).device
+    print(f"flow model device: {model_device}", flush=True)
+    print(f"initializing flow trainer: output_dir={training_args.output_dir}", flush=True)
+    print(
+        f"flow trainer strategies: eval_strategy={training_args.eval_strategy} "
+        f"save_strategy={training_args.save_strategy} do_eval={training_args.do_eval} "
+        f"train_batch_size={training_args.per_device_train_batch_size} "
+        f"gradient_accumulation_steps={training_args.gradient_accumulation_steps} "
+        f"logging_steps={training_args.logging_steps}",
+        flush=True,
     )
     trainer = ComponentLoggingTrainer(
         model=model,
@@ -239,11 +287,16 @@ def train_chunked_flow_with_trainer(
         train_dataset=dataset,
         data_collator=collate_teacher_windows,
     )
+    print("flow trainer initialized", flush=True)
+    print("flow training started", flush=True)
     train_result = trainer.train(resume_from_checkpoint=getattr(training_args, "resume_from_checkpoint", None))
+    print("flow training finished", flush=True)
+    print(f"saving flow model: {training_args.output_dir}", flush=True)
     trainer.save_model(training_args.output_dir)
     trainer.log_metrics("train", train_result.metrics)
     trainer.save_metrics("train", train_result.metrics)
     trainer.save_state()
+    print(f"flow training state saved: {training_args.output_dir}", flush=True)
 
     output_dir = Path(training_args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -269,6 +322,7 @@ __all__ = [
     "ComponentLoggingTrainer",
     "FlowLossArguments",
     "FlowLossOutput",
+    "_parameter_counts",
     "SingleExpertFlowTrainingModule",
     "TeacherDataArguments",
     "flow_config_from_args",

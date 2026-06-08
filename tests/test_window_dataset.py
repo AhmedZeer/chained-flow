@@ -29,6 +29,7 @@ def test_teacher_window_dataset_derives_dynamic_training_fields():
     assert sample["context_hidden"].shape == (3, 2)
     assert sample["target_hidden"].shape == (2, 2)
     assert sample["future_tokens"].shape == (2,)
+    assert windows.available_windows == 2
 
 
 def test_teacher_window_dataset_pads_short_left_context():
