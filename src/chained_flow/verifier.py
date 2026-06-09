@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import copy
 
 import torch
 
@@ -30,8 +31,15 @@ class SpeculativeVerifier:
         device = self.frozen_lm.device
         draft_tokens = draft_tokens.to(device)
 
+        verify_state = LMState(
+            input_ids=state.input_ids,
+            past_key_values=copy.deepcopy(state.past_key_values),
+            final_hidden=state.final_hidden,
+            logits=state.logits,
+            position=state.position,
+        )
         with timed_section(timings, "verifier_forward", device):
-            verified_state, forward_timings = self.frozen_lm.forward_with_cache(draft_tokens, state, use_cache=True)
+            verified_state, forward_timings = self.frozen_lm.forward_with_cache(draft_tokens, verify_state, use_cache=True)
         timings.merge(forward_timings)
 
         with timed_section(timings, "acceptance", device):
@@ -51,19 +59,17 @@ class SpeculativeVerifier:
 
         with timed_section(timings, "cache_repair", device):
             committed_count = acceptance.accepted_len
-            committed_end = state.position + committed_count
-            if hasattr(verified_state.past_key_values, "crop"):
-                verified_state.past_key_values.crop(committed_end)
-            committed_ids = torch.cat(
-                [state.input_ids, draft_tokens[:, :committed_count]],
-                dim=1,
-            )
-            verified_state = LMState(
-                input_ids=committed_ids,
-                past_key_values=verified_state.past_key_values,
-                final_hidden=verified_state.final_hidden[:, : committed_ids.shape[1], :],
-                logits=verified_state.logits[:, : committed_ids.shape[1], :],
-                position=committed_ids.shape[1],
-            )
+            if committed_count == draft_tokens.shape[1]:
+                repaired_state = verified_state
+            elif committed_count == 0:
+                repaired_state = state
+            else:
+                committed_tokens = draft_tokens[:, :committed_count]
+                repaired_state, repair_timings = self.frozen_lm.forward_with_cache(
+                    committed_tokens,
+                    state,
+                    use_cache=True,
+                )
+                timings.merge(repair_timings)
 
-        return VerifyResult(state=verified_state, acceptance=acceptance, timings=timings)
+        return VerifyResult(state=repaired_state, acceptance=acceptance, timings=timings)
