@@ -29,11 +29,11 @@ def write_vae_checkpoint(path, *, hidden_size=8, latent_size=3, intermediate_siz
     torch.save({f"vae.{key}": value for key, value in vae.state_dict().items()}, path / "pytorch_model.bin")
 
 
-def flow_config(vae_dir, *, context_size=3, num_flow_steps=1):
+def flow_config(vae_dir, *, context_size=3, draft_length=2, num_flow_steps=1):
     return SingleExpertFlowConfig(
         context_size=context_size,
-        draft_length=2,
-        chunk_size=2,
+        draft_length=draft_length,
+        chunk_size=draft_length,
         vae_dir=str(vae_dir),
         expert_dim=8,
         num_heads=2,
@@ -59,11 +59,18 @@ def test_cross_attention_flow_expert_returns_velocity_shape():
     assert velocity.shape == (4, 2, 3)
 
 
-def test_single_expert_flow_config_rejects_non_phase_one_shapes(tmp_path):
-    with pytest.raises(ValueError, match="draft_length=2"):
-        SingleExpertFlowConfig(vae_dir=str(tmp_path), draft_length=3, chunk_size=3)
+def test_single_expert_flow_config_accepts_variable_draft_length(tmp_path):
+    config = SingleExpertFlowConfig(vae_dir=str(tmp_path), draft_length=4, chunk_size=4)
+
+    assert config.draft_length == 4
+    assert config.chunk_size == 4
+
+
+def test_single_expert_flow_config_rejects_invalid_shapes(tmp_path):
+    with pytest.raises(ValueError, match="draft_length must be >= 1"):
+        SingleExpertFlowConfig(vae_dir=str(tmp_path), draft_length=0, chunk_size=0)
     with pytest.raises(ValueError, match="chunk_size == draft_length"):
-        SingleExpertFlowConfig(vae_dir=str(tmp_path), draft_length=2, chunk_size=1)
+        SingleExpertFlowConfig(vae_dir=str(tmp_path), draft_length=4, chunk_size=2)
 
 
 def test_single_expert_flow_drafter_predicts_and_proposes(fake_wrapper, tmp_path):
@@ -106,12 +113,12 @@ def test_single_expert_flow_training_module_returns_finite_loss_and_gradients(fa
     write_vae_checkpoint(vae_dir, hidden_size=fake_wrapper.model.config.hidden_size)
     module = SingleExpertFlowTrainingModule(
         fake_wrapper,
-        flow_config(vae_dir, context_size=2),
+        flow_config(vae_dir, context_size=2, draft_length=4),
         FlowLossArguments(),
     )
     context_hidden = torch.randn(3, 2, fake_wrapper.model.config.hidden_size)
-    target_hidden = torch.randn(3, 2, fake_wrapper.model.config.hidden_size)
-    future_tokens = torch.tensor([[1, 2], [2, 3], [3, 4]])
+    target_hidden = torch.randn(3, 4, fake_wrapper.model.config.hidden_size)
+    future_tokens = torch.tensor([[1, 2, 3, 4], [2, 3, 4, 5], [3, 4, 5, 6]])
 
     output = module(
         context_hidden=context_hidden,
@@ -122,7 +129,7 @@ def test_single_expert_flow_training_module_returns_finite_loss_and_gradients(fa
 
     assert torch.isfinite(output["loss"])
     assert output["loss"].ndim == 0
-    assert output["pred_latent"].shape == (3, 2, 3)
+    assert output["pred_latent"].shape == (3, 4, 3)
     assert output["pred_hidden"].shape == target_hidden.shape
     for name in [
         "loss_component/flow.mse",

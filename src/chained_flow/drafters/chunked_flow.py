@@ -23,10 +23,10 @@ class SingleExpertFlowConfig:
     noise_scale: float = 1.0
 
     def __post_init__(self) -> None:
-        if self.draft_length != 2:
-            raise ValueError("phase-1 SingleExpertFlowDrafter requires draft_length=2")
+        if self.draft_length < 1:
+            raise ValueError("draft_length must be >= 1")
         if self.chunk_size != self.draft_length:
-            raise ValueError("phase-1 SingleExpertFlowDrafter requires chunk_size == draft_length")
+            raise ValueError("SingleExpertFlowDrafter requires chunk_size == draft_length")
         if self.num_flow_steps < 1:
             raise ValueError("num_flow_steps must be >= 1")
         if self.vae_dir is None:
