@@ -6,12 +6,13 @@ Use these table shapes when reporting flow drafter training and eval results.
 
 Use this for the latest eval result per config.
 
-| config | seq@2 | eval accept len | real speed |
-|---|---:|---:|---:|
-| example_config | 0.000 | 0.000 | 0.000x |
+| config | seq@K | eval accept len | live accept len | real speed |
+|---|---:|---:|---:|---:|
+| example_config | 0.000 | 0.000 | 0.000 | 0.000x |
 
-- `seq@2`: `token.sequence_match` mean.
-- `eval accept len`: `accept.greedy_prefix_len` mean.
+- `seq@K`: `token.sequence_match` mean. For `K=2`, this is equivalent to `seq@2`.
+- `eval accept len`: teacher-forced `accept.greedy_prefix_len` mean.
+- `live accept len`: live-generation `speedup.mean_accept_len`. Use `-` if speedup was not measured.
 - `real speed`: `speedup.real` from eval JSON. Use `-` if speedup was not measured.
 
 ## Eval Progress

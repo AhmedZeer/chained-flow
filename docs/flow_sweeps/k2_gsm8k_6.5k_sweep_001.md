@@ -48,17 +48,18 @@ Note: this sweep logged `logit.ce`; the requested component table reserves `logi
 
 ### Eval Summary
 
-| config | seq@2 | eval accept len | real speed |
-|---|---:|---:|---:|
-| expert_dim_512 | 0.668 | 1.531 | 0.400x |
-| expert_dim_384 | 0.640 | 1.488 | 0.422x |
-| expert_dim_256 | 0.567 | 1.384 | 0.374x |
-| ffn_multiplier_16 | 0.523 | 1.279 | 0.331x |
-| ffn_multiplier_12 | 0.518 | 1.272 | 0.330x |
-| ffn_multiplier_8 | 0.506 | 1.251 | 0.342x |
-| context_size_8 | 0.399 | 1.025 | 0.301x |
-| context_size_12 | 0.341 | 0.890 | 0.293x |
-| context_size_16 | 0.308 | 0.813 | 0.275x |
+| config | seq@2 | eval accept len | live accept len | real speed |
+|---|---:|---:|---:|---:|
+| expert_dim_512 | 0.668 | 1.531 | 0.776 | 0.400x |
+| expert_dim_384 | 0.640 | 1.488 | 0.840 | 0.422x |
+| expert_dim_256 | 0.567 | 1.384 | 0.640 | 0.374x |
+| ffn_multiplier_16 | 0.523 | 1.279 | 0.396 | 0.331x |
+| ffn_multiplier_12 | 0.518 | 1.272 | 0.408 | 0.330x |
+| ffn_multiplier_8 | 0.506 | 1.251 | 0.454 | 0.342x |
+| context_size_8 | 0.399 | 1.025 | 0.261 | 0.301x |
+| context_size_12 | 0.341 | 0.890 | 0.213 | 0.293x |
+| context_size_16 | 0.308 | 0.813 | 0.133 | 0.275x |
+
 
 ### Test Eval Progress
 
@@ -80,17 +81,18 @@ Cell values are eval accept length (`accept.greedy_prefix_len`).
 
 ### Eval Summary
 
-| config | seq@2 | eval accept len | real speed |
-|---|---:|---:|---:|
-| expert_dim_512 | 0.690 | 1.569 | 0.368x |
-| expert_dim_384 | 0.655 | 1.515 | 0.376x |
-| expert_dim_256 | 0.576 | 1.402 | 0.370x |
-| ffn_multiplier_16 | 0.529 | 1.292 | 0.321x |
-| ffn_multiplier_12 | 0.523 | 1.283 | 0.293x |
-| ffn_multiplier_8 | 0.510 | 1.262 | 0.332x |
-| context_size_8 | 0.402 | 1.035 | 0.295x |
-| context_size_12 | 0.346 | 0.904 | 0.270x |
-| context_size_16 | 0.312 | 0.827 | 0.284x |
+| config | seq@2 | eval accept len | live accept len | real speed |
+|---|---:|---:|---:|---:|
+| expert_dim_512 | 0.690 | 1.569 | 0.584 | 0.368x |
+| expert_dim_384 | 0.655 | 1.515 | 0.663 | 0.376x |
+| expert_dim_256 | 0.576 | 1.402 | 0.541 | 0.370x |
+| ffn_multiplier_16 | 0.529 | 1.292 | 0.356 | 0.321x |
+| ffn_multiplier_12 | 0.523 | 1.283 | 0.271 | 0.293x |
+| ffn_multiplier_8 | 0.510 | 1.262 | 0.420 | 0.332x |
+| context_size_8 | 0.402 | 1.035 | 0.191 | 0.295x |
+| context_size_12 | 0.346 | 0.904 | 0.139 | 0.270x |
+| context_size_16 | 0.312 | 0.827 | 0.186 | 0.284x |
+
 
 No train-data eval progress table is available for this sweep because the training-data eval run did not produce checkpoint-suffixed files.
 

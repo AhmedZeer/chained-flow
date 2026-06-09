@@ -45,14 +45,14 @@ Note: this sweep logged `logit.ce`; the requested component table reserves `logi
 
 This table uses the latest evaluated checkpoint for each config. `seq@K` is full draft-sequence match at that config's `draft_length`, not the old `K=2` metric.
 
-| config | seq@K | eval accept len | real speed |
-|---|---:|---:|---:|
-| k4_expert_dim_512 | 0.258 | 2.067 | 0.320x |
-| k4_expert_dim_384 | 0.229 | 1.939 | 0.295x |
-| k6_expert_dim_512 | 0.083 | 2.259 | 0.265x |
-| k6_expert_dim_384 | 0.071 | 2.123 | 0.297x |
-| k8_expert_dim_512 | 0.023 | 2.290 | 0.270x |
-| k8_expert_dim_384 | 0.019 | 2.139 | 0.269x |
+| config | seq@K | eval accept len | live accept len | real speed |
+|---|---:|---:|---:|---:|
+| k4_expert_dim_512 | 0.258 | 2.067 | 0.399 | 0.320x |
+| k4_expert_dim_384 | 0.229 | 1.939 | 0.255 | 0.295x |
+| k6_expert_dim_512 | 0.083 | 2.259 | 0.185 | 0.265x |
+| k6_expert_dim_384 | 0.071 | 2.123 | 0.349 | 0.297x |
+| k8_expert_dim_512 | 0.023 | 2.290 | 0.233 | 0.270x |
+| k8_expert_dim_384 | 0.019 | 2.139 | 0.256 | 0.269x |
 
 ### Test Eval Progress
 
