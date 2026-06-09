@@ -142,16 +142,22 @@ class SingleExpertFlowDrafter(nn.Module):
         pad = hidden[:, :1, :].expand(-1, pad_len, -1)
         return torch.cat([pad, hidden], dim=1)
 
+    def _vae_dtype(self) -> torch.dtype:
+        return next(self.vae.parameters()).dtype
+
+    def _expert_dtype(self) -> torch.dtype:
+        return next(self.expert.parameters()).dtype
+
     def encode_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
         original_shape = hidden.shape[:-1]
-        flat_hidden = hidden.reshape(-1, hidden.shape[-1])
+        flat_hidden = hidden.reshape(-1, hidden.shape[-1]).to(device=self.frozen_lm.device, dtype=self._vae_dtype())
         with torch.no_grad():
             latent = self.vae.encode(flat_hidden).mu
         return latent.reshape(*original_shape, -1)
 
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
         original_shape = latent.shape[:-1]
-        flat_latent = latent.reshape(-1, latent.shape[-1])
+        flat_latent = latent.reshape(-1, latent.shape[-1]).to(device=self.frozen_lm.device, dtype=self._vae_dtype())
         decoded = self.vae.decode(flat_latent)
         return decoded.reshape(*original_shape, -1)
 
@@ -164,6 +170,7 @@ class SingleExpertFlowDrafter(nn.Module):
     ) -> torch.Tensor:
         if context_latents.ndim != 3:
             raise ValueError("context_latents must have shape [B, m, Z]")
+        context_latents = context_latents.to(device=self.frozen_lm.device, dtype=self._expert_dtype())
         batch = context_latents.shape[0]
         steps = self.config.num_flow_steps if num_steps is None else num_steps
         if steps < 1:
@@ -177,7 +184,7 @@ class SingleExpertFlowDrafter(nn.Module):
                 dtype=context_latents.dtype,
             ) * self.config.noise_scale
         else:
-            z = z0
+            z = z0.to(device=context_latents.device, dtype=context_latents.dtype)
         dt = 1.0 / steps
         for step in range(steps):
             tau = torch.full((batch,), step * dt, device=context_latents.device, dtype=context_latents.dtype)
