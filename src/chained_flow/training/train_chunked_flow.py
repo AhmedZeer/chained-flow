@@ -29,6 +29,8 @@ class ChunkedFlowModelArguments:
     ffn_multiplier: int = 4
     num_flow_steps: int = 1
     noise_scale: float = 1.0
+    train_vae: bool = False
+    vae_learning_rate_multiplier: float = 0.05
     local_files_only: bool = False
     device: str | None = None
 
@@ -70,6 +72,7 @@ class SingleExpertFlowTrainingModule(nn.Module):
         super().__init__()
         self.drafter = SingleExpertFlowDrafter(frozen_lm, drafter_config)
         self.loss_config = loss_config
+        self.include_vae_in_state_dict = drafter_config.train_vae
         lm_head = frozen_lm.model.lm_head
         self.register_buffer("lm_head_weight", lm_head.weight.detach().clone(), persistent=False)
         bias = getattr(lm_head, "bias", None)
@@ -80,6 +83,8 @@ class SingleExpertFlowTrainingModule(nn.Module):
 
     def state_dict(self, *args, **kwargs):
         state = super().state_dict(*args, **kwargs)
+        if self.include_vae_in_state_dict:
+            return state
         return {key: value for key, value in state.items() if not key.startswith("drafter.vae.")}
 
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
@@ -180,6 +185,26 @@ class SingleExpertFlowTrainingModule(nn.Module):
 
 
 class ComponentLoggingTrainer(Trainer):
+    def __init__(self, *args, vae_learning_rate_multiplier: float = 0.05, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vae_learning_rate_multiplier = vae_learning_rate_multiplier
+
+    def create_optimizer(self):
+        if self.optimizer is not None:
+            return self.optimizer
+        trainable = [param for param in self.model.parameters() if param.requires_grad]
+        vae_params = [param for name, param in self.model.named_parameters() if param.requires_grad and ".vae." in name]
+        vae_param_ids = {id(param) for param in vae_params}
+        flow_params = [param for param in trainable if id(param) not in vae_param_ids]
+        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args)
+        groups = []
+        if flow_params:
+            groups.append({"params": flow_params})
+        if vae_params:
+            groups.append({"params": vae_params, "lr": self.args.learning_rate * self.vae_learning_rate_multiplier})
+        self.optimizer = optimizer_cls(groups, **optimizer_kwargs)
+        return self.optimizer
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
         outputs = model(**inputs)
         loss = outputs["loss"]
@@ -191,6 +216,12 @@ class ComponentLoggingTrainer(Trainer):
         if component_logs and self.state.global_step % max(1, self.args.logging_steps) == 0:
             self.log(component_logs)
         return (loss, outputs) if return_outputs else loss
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        inputs = self._prepare_inputs(inputs)
+        with torch.no_grad():
+            loss = self.compute_loss(model, inputs)
+        return loss.detach(), None, None
 
 
 def flow_config_from_args(args: ChunkedFlowModelArguments) -> SingleExpertFlowConfig:
@@ -204,6 +235,7 @@ def flow_config_from_args(args: ChunkedFlowModelArguments) -> SingleExpertFlowCo
         ffn_multiplier=args.ffn_multiplier,
         num_flow_steps=args.num_flow_steps,
         noise_scale=args.noise_scale,
+        train_vae=args.train_vae,
     )
 
 
@@ -262,7 +294,8 @@ def train_chunked_flow_with_trainer(
         f"draft_length={model_args.draft_length} chunk_size={model_args.chunk_size} "
         f"expert_dim={model_args.expert_dim} num_heads={model_args.num_heads} "
         f"ffn_multiplier={model_args.ffn_multiplier} num_flow_steps={model_args.num_flow_steps} "
-        f"noise_scale={model_args.noise_scale} vae_dir={model_args.vae_dir}",
+        f"noise_scale={model_args.noise_scale} train_vae={model_args.train_vae} "
+        f"vae_lr_multiplier={model_args.vae_learning_rate_multiplier} vae_dir={model_args.vae_dir}",
         flush=True,
     )
     model = SingleExpertFlowTrainingModule(
@@ -287,11 +320,14 @@ def train_chunked_flow_with_trainer(
         f"logging_steps={training_args.logging_steps}",
         flush=True,
     )
+    eval_dataset = dataset if str(training_args.eval_strategy) != "IntervalStrategy.NO" and training_args.do_eval else None
     trainer = ComponentLoggingTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
+        eval_dataset=eval_dataset,
         data_collator=collate_teacher_windows,
+        vae_learning_rate_multiplier=model_args.vae_learning_rate_multiplier,
     )
     print("flow trainer initialized", flush=True)
     print("flow training started", flush=True)

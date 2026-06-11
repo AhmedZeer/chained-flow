@@ -15,10 +15,13 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from chained_flow.context import ChainedFlowContext
 from chained_flow.frozen_lm import DEFAULT_MODEL_ID
+from chained_flow.generation import generate_with_drafter
 from chained_flow.timing import synchronize_if_needed
 from chained_flow.training.collators import collate_teacher_windows
 from chained_flow.training.eval_chunked_flow import (
+    collect_speedup_prompts,
     find_flow_config_dir,
+    generate_greedy_baseline,
     load_flow_training_module,
     torch_dtype_from_string,
 )
@@ -74,6 +77,30 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Also time a regular Qwen backbone forward over the same K-token span.",
+    )
+    parser.add_argument(
+        "--profile_generation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Also time end-to-end greedy backbone generation versus drafter+verifier generation.",
+    )
+    parser.add_argument(
+        "--generation_num_prompts",
+        type=int,
+        default=16,
+        help="Number of prompts for end-to-end generation timing.",
+    )
+    parser.add_argument(
+        "--generation_warmup_prompts",
+        type=int,
+        default=2,
+        help="Warmup prompts for end-to-end generation timing.",
+    )
+    parser.add_argument(
+        "--generation_max_new_tokens",
+        type=int,
+        default=32,
+        help="New tokens per prompt for end-to-end generation timing.",
     )
     parser.add_argument("--window_seed", type=int, default=0)
     parser.add_argument("--noise_seed", type=int, default=0)
@@ -224,6 +251,119 @@ def profile_backbone_batch(*, frozen_lm, batch: dict[str, torch.Tensor], device:
     future_tokens = batch["future_tokens"].to(device)
     _, seconds = time_section(device, lambda: frozen_lm._forward(future_tokens, use_cache=True))
     return {"backbone.forward_k_tokens": seconds}
+
+
+
+def summarize_generation_profile(*, frozen_lm, module, dataset, num_prompts: int, warmup_prompts: int, max_new_tokens: int) -> dict[str, Any]:
+    if num_prompts < 1:
+        raise ValueError("generation_num_prompts must be >= 1")
+    if warmup_prompts < 0:
+        raise ValueError("generation_warmup_prompts must be >= 0")
+    if max_new_tokens < 1:
+        raise ValueError("generation_max_new_tokens must be >= 1")
+
+    warmups, prompts = collect_speedup_prompts(dataset, num_prompts=num_prompts, warmup_prompts=warmup_prompts)
+    draft_len = module.drafter.config.draft_length
+    context = ChainedFlowContext(frozen_lm)
+
+    for prompt in warmups:
+        generate_greedy_baseline(frozen_lm, prompt, max_new_tokens=max_new_tokens)
+        generate_with_drafter(context, module.drafter, prompt, max_new_tokens=max_new_tokens, draft_len=draft_len)
+
+    backbone_seconds = 0.0
+    backbone_decode_seconds = 0.0
+    backbone_tokens = 0.0
+    flow_seconds = 0.0
+    flow_decode_seconds = 0.0
+    flow_tokens = 0.0
+    accepted = 0.0
+    drafted = 0.0
+    steps = 0.0
+    flow_timing_sections: dict[str, float] = {}
+
+    for prompt in prompts:
+        baseline = generate_greedy_baseline(frozen_lm, prompt, max_new_tokens=max_new_tokens)
+        backbone_seconds += float(baseline["seconds"])
+        backbone_decode_seconds += float(baseline["decode_seconds"])
+        backbone_tokens += float(baseline["generated_tokens"])
+
+        flow = generate_with_drafter(context, module.drafter, prompt, max_new_tokens=max_new_tokens, draft_len=draft_len)
+        total_generation = float(flow.timings.get("total_generation"))
+        prefill = float(flow.timings.get("prefill"))
+        flow_seconds += total_generation
+        flow_decode_seconds += max(0.0, total_generation - prefill)
+        flow_tokens += float(flow.generated_token_count)
+        for name, seconds in flow.timings.sections.items():
+            if name in {"total_generation", "tokens_per_second"}:
+                continue
+            flow_timing_sections[name] = flow_timing_sections.get(name, 0.0) + float(seconds)
+        for step in flow.step_stats:
+            accepted += float(step.accepted_len)
+            drafted += float(step.draft_len)
+            steps += 1.0
+
+    backbone_tps = backbone_tokens / backbone_seconds if backbone_seconds > 0 else 0.0
+    flow_tps = flow_tokens / flow_seconds if flow_seconds > 0 else 0.0
+    backbone_decode_tps = backbone_tokens / backbone_decode_seconds if backbone_decode_seconds > 0 else 0.0
+    flow_decode_tps = flow_tokens / flow_decode_seconds if flow_decode_seconds > 0 else 0.0
+    mean_accept = accepted / steps if steps > 0 else 0.0
+    mean_draft = drafted / steps if steps > 0 else 0.0
+
+    section_total = sum(flow_timing_sections.values())
+    section_details = {
+        name: {
+            "seconds": seconds,
+            "percent_generation": 100.0 * seconds / flow_seconds if flow_seconds > 0 else 0.0,
+            "percent_profiled_sections": 100.0 * seconds / section_total if section_total > 0 else 0.0,
+        }
+        for name, seconds in sorted(flow_timing_sections.items(), key=lambda item: item[1], reverse=True)
+    }
+
+    grouped_sections: dict[str, float] = {
+        "prefill": flow_timing_sections.get("prefill", 0.0),
+        "anchor_next_token": flow_timing_sections.get("next_token", 0.0),
+        "anchor_forward_with_cache": flow_timing_sections.get("forward_with_cache", 0.0),
+        "drafter": sum(seconds for name, seconds in flow_timing_sections.items() if name.startswith("drafter.")),
+        "verifier_forward": flow_timing_sections.get("verifier.verifier_forward", 0.0),
+        "verifier_acceptance": flow_timing_sections.get("verifier.acceptance", 0.0),
+        "verifier_cache_repair": flow_timing_sections.get("verifier.cache_repair", 0.0),
+        "verifier_nested_forward_with_cache": flow_timing_sections.get("verifier.forward_with_cache", 0.0),
+    }
+    grouped_total = sum(grouped_sections.values())
+    grouped_details = {
+        name: {
+            "seconds": seconds,
+            "percent_generation": 100.0 * seconds / flow_seconds if flow_seconds > 0 else 0.0,
+            "percent_grouped_sections": 100.0 * seconds / grouped_total if grouped_total > 0 else 0.0,
+        }
+        for name, seconds in sorted(grouped_sections.items(), key=lambda item: item[1], reverse=True)
+    }
+
+    return {
+        "num_prompts": len(prompts),
+        "warmup_prompts": len(warmups),
+        "max_new_tokens": max_new_tokens,
+        "draft_len": draft_len,
+        "backbone_seconds": backbone_seconds,
+        "backbone_decode_seconds": backbone_decode_seconds,
+        "backbone_generated_tokens": int(backbone_tokens),
+        "backbone_tokens_per_second": backbone_tps,
+        "backbone_decode_tokens_per_second": backbone_decode_tps,
+        "drafter_verifier_seconds": flow_seconds,
+        "drafter_verifier_decode_seconds": flow_decode_seconds,
+        "drafter_verifier_generated_tokens": int(flow_tokens),
+        "drafter_verifier_tokens_per_second": flow_tps,
+        "drafter_verifier_decode_tokens_per_second": flow_decode_tps,
+        "real_speedup": flow_tps / backbone_tps if backbone_tps > 0 else 0.0,
+        "decode_only_speedup": flow_decode_tps / backbone_decode_tps if backbone_decode_tps > 0 else 0.0,
+        "mean_accept_len": mean_accept,
+        "mean_draft_len": mean_draft,
+        "draft_steps": int(steps),
+        "timing_sections": section_details,
+        "timing_sections_profiled_total_seconds": section_total,
+        "timing_groups": grouped_details,
+        "timing_groups_profiled_total_seconds": grouped_total,
+    }
 
 
 def summarize_timing_group(timings: dict[str, float], names: list[str], *, num_examples: int, draft_length: int, total: float) -> dict[str, dict[str, float]]:
@@ -379,6 +519,32 @@ def print_summary(result: dict[str, Any]) -> None:
                 flush=True,
             )
 
+    generation = summary.get("generation_e2e")
+    if generation:
+        print("", flush=True)
+        print("End-to-end generation", flush=True)
+        print("------------------------", flush=True)
+        print(f"Prompts / max new tokens       : {generation['num_prompts']} / {generation['max_new_tokens']}", flush=True)
+        print(f"Backbone alone seconds         : {generation['backbone_seconds']:.4f} s", flush=True)
+        print(f"Drafter + verifier seconds     : {generation['drafter_verifier_seconds']:.4f} s", flush=True)
+        print(f"Backbone tokens / second       : {generation['backbone_tokens_per_second']:.2f}", flush=True)
+        print(f"Drafter + verifier tokens/sec  : {generation['drafter_verifier_tokens_per_second']:.2f}", flush=True)
+        print(f"Real speedup                   : {generation['real_speedup']:.3f}x", flush=True)
+        print(f"Decode-only speedup            : {generation['decode_only_speedup']:.3f}x", flush=True)
+        print(f"Mean accepted / drafted        : {generation['mean_accept_len']:.3f} / {generation['mean_draft_len']:.3f}", flush=True)
+        timing_groups = generation.get("timing_groups", {})
+        if timing_groups:
+            print("", flush=True)
+            print("Drafter + verifier timing groups", flush=True)
+            print("--------------------------------", flush=True)
+            for name, section in timing_groups.items():
+                print(
+                    f"{name:<36} "
+                    f"{section['seconds']:>8.4f} s  "
+                    f"{section['percent_generation']:>5.1f}% of generation",
+                    flush=True,
+                )
+
     print("", flush=True)
     print("Largest costs", flush=True)
     print("-------------", flush=True)
@@ -399,6 +565,12 @@ def main() -> None:
         raise ValueError("batch_size must be >= 1")
     if args.warmup_batches < 0:
         raise ValueError("warmup_batches must be >= 0")
+    if args.profile_generation and args.generation_num_prompts < 1:
+        raise ValueError("generation_num_prompts must be >= 1")
+    if args.profile_generation and args.generation_warmup_prompts < 0:
+        raise ValueError("generation_warmup_prompts must be >= 0")
+    if args.profile_generation and args.generation_max_new_tokens < 1:
+        raise ValueError("generation_max_new_tokens must be >= 1")
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     dtype = torch_dtype_from_string(args.dtype)
@@ -483,6 +655,21 @@ def main() -> None:
         flow_timings=flow_timings if args.profile_flow_ops else None,
         backbone_timings=backbone_timings if args.profile_backbone else None,
     )
+    if args.profile_generation:
+        print(
+            "profiling end-to-end generation: "
+            f"prompts={args.generation_num_prompts} warmup={args.generation_warmup_prompts} "
+            f"max_new_tokens={args.generation_max_new_tokens}",
+            flush=True,
+        )
+        summary["generation_e2e"] = summarize_generation_profile(
+            frozen_lm=frozen_lm,
+            module=module,
+            dataset=dataset,
+            num_prompts=args.generation_num_prompts,
+            warmup_prompts=args.generation_warmup_prompts,
+            max_new_tokens=args.generation_max_new_tokens,
+        )
     metadata = {
         "flow_dir": args.flow_dir,
         "dataset_path": args.dataset_path,
@@ -495,6 +682,10 @@ def main() -> None:
         "warmup_batches": args.warmup_batches,
         "profile_flow_ops": args.profile_flow_ops,
         "profile_backbone": args.profile_backbone,
+        "profile_generation": args.profile_generation,
+        "generation_num_prompts": args.generation_num_prompts,
+        "generation_warmup_prompts": args.generation_warmup_prompts,
+        "generation_max_new_tokens": args.generation_max_new_tokens,
         "context_size": model_args.context_size,
         "draft_length": model_args.draft_length,
         "chunk_size": model_args.chunk_size,

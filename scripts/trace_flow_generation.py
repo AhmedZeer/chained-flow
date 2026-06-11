@@ -17,6 +17,7 @@ from chained_flow.frozen_lm import DEFAULT_MODEL_ID
 from chained_flow.training.eval_chunked_flow import load_flow_training_module, torch_dtype_from_string
 from chained_flow.training.train_chunked_flow import ChunkedFlowModelArguments
 from chained_flow.training.eval_chunked_flow import find_flow_config_dir
+from chained_flow.training.window_dataset import FlowWindowCacheDataset, TeacherWindowDataset
 from chained_flow.verifier import SpeculativeVerifier
 
 
@@ -24,13 +25,32 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Trace greedy backbone generation, drafter-only rollout, and drafter+verifier rollout "
-            "from the same prompt."
+            "from the same prompt or from a sampled teacher-training window."
         )
     )
     parser.add_argument("--flow_dir", required=True, help="Flow checkpoint directory, e.g. .../checkpoint-98316.")
-    prompt = parser.add_mutually_exclusive_group(required=True)
-    prompt.add_argument("--prompt", help="Prompt text.")
-    prompt.add_argument("--prompt_file", help="Path to a UTF-8 prompt text file.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--dataset_path", help="Teacher dataset/cache path. Uses the same window sampling as training.")
+    source.add_argument("--prompt", help="Prompt text.")
+    source.add_argument("--prompt_file", help="Path to a UTF-8 prompt text file.")
+    parser.add_argument("--dataset_split", default="train", help="Dataset split when --dataset_path is a hub dataset.")
+    parser.add_argument(
+        "--dataset_index",
+        type=int,
+        default=0,
+        help="Window index to sample from --dataset_path. Uses seed+index, same as training.",
+    )
+    parser.add_argument(
+        "--window_seed",
+        type=int,
+        default=0,
+        help="Window sampling seed for --dataset_path. Match the training config seed to trace a trained window.",
+    )
+    parser.add_argument(
+        "--no_materialize_rows",
+        action="store_true",
+        help="Do not materialize non-cache dataset rows before sampling. Ignored for flow caches.",
+    )
     parser.add_argument(
         "--decode_prompt_escapes",
         action="store_true",
@@ -85,6 +105,72 @@ def load_model_args(flow_dir: str | Path) -> ChunkedFlowModelArguments:
     with (config_dir / "chained_flow_chunked_flow_config.json").open("r", encoding="utf-8") as f:
         config = json.load(f)
     return ChunkedFlowModelArguments(**config["model_args"])
+
+
+
+def row_tensors(dataset, row_idx: int) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if isinstance(dataset, FlowWindowCacheDataset):
+        offset = int(dataset.row_offsets[row_idx].item())
+        length = int(dataset.row_lengths[row_idx].item())
+        return dataset.input_ids[offset : offset + length].long(), dataset.hidden[offset : offset + length].float()
+
+    if getattr(dataset, "row_tensors", None) is not None:
+        input_ids, hidden = dataset.row_tensors[row_idx]
+        return input_ids.long(), hidden.float()
+
+    hf_dataset = getattr(dataset, "dataset", None)
+    if hf_dataset is not None:
+        row = hf_dataset[row_idx]
+        input_ids = torch.as_tensor(row["input_ids"], dtype=torch.long)
+        hidden = None
+        if "final_hidden" in row:
+            hidden = torch.as_tensor(row["final_hidden"], dtype=torch.float32)
+        return input_ids, hidden
+
+    raise TypeError("dataset mode requires a TeacherWindowDataset or FlowWindowCacheDataset")
+
+
+def load_dataset_prompt(
+    args: argparse.Namespace,
+    model_args: ChunkedFlowModelArguments,
+    frozen_lm,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    if args.dataset_index < 0:
+        raise ValueError("dataset_index must be >= 0")
+
+    dataset = TeacherWindowDataset.from_path(
+        args.dataset_path,
+        split=args.dataset_split,
+        context_size=model_args.context_size,
+        draft_length=model_args.draft_length,
+        windows_per_epoch=None,
+        seed=args.window_seed,
+        materialize_rows=not args.no_materialize_rows,
+    )
+    row_idx, t = dataset._sample_row_and_t(args.dataset_index)
+    input_ids, _ = row_tensors(dataset, int(row_idx))
+    prefix_end = int(t) + 1
+    future_end = min(prefix_end + args.max_new_tokens, int(input_ids.shape[0]))
+    teacher_future_ids = ids_list(input_ids[prefix_end:future_end])
+    training_window_future_ids = ids_list(
+        input_ids[prefix_end : min(prefix_end + model_args.draft_length, int(input_ids.shape[0]))]
+    )
+    prefix = input_ids[:prefix_end].long().unsqueeze(0)
+
+    return prefix, {
+        "input_source": "dataset",
+        "dataset_path": args.dataset_path,
+        "dataset_split": args.dataset_split,
+        "dataset_index": args.dataset_index,
+        "window_seed": args.window_seed,
+        "sampled_row_idx": int(row_idx),
+        "sampled_t": int(t),
+        "prefix_tokens": int(prefix.shape[1]),
+        "teacher_future_ids": teacher_future_ids,
+        "teacher_future_text": decode_ids(frozen_lm, teacher_future_ids),
+        "sampled_training_window_future_ids": training_window_future_ids,
+        "sampled_training_window_future_text": decode_ids(frozen_lm, training_window_future_ids),
+    }
 
 
 def ids_list(tensor: torch.Tensor) -> list[int]:
@@ -342,7 +428,6 @@ def main() -> None:
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     dtype = torch_dtype_from_string(args.dtype)
-    raw_prompt = read_prompt(args)
     model_args = load_model_args(args.flow_dir)
     draft_len = model_args.draft_length if args.draft_len is None else args.draft_len
     if draft_len < 1:
@@ -360,14 +445,34 @@ def main() -> None:
     print(f"loading flow checkpoint: {args.flow_dir}", flush=True)
     module, config = load_flow_training_module(args.flow_dir, frozen_lm=frozen_lm, device=device)
 
-    prompt = render_prompt(frozen_lm, raw_prompt, chat_template=args.chat_template)
-    input_ids = frozen_lm.tokenize(prompt)
+    if args.dataset_path is not None:
+        input_ids, source_metadata = load_dataset_prompt(args, model_args, frozen_lm)
+    else:
+        raw_prompt = read_prompt(args)
+        prompt = render_prompt(frozen_lm, raw_prompt, chat_template=args.chat_template)
+        input_ids = frozen_lm.tokenize(prompt)
+        source_metadata = {
+            "input_source": "prompt",
+            "raw_prompt": raw_prompt,
+            "rendered_prompt": prompt,
+        }
+
     print("", flush=True)
     print("trace setup", flush=True)
     print("===========", flush=True)
     print(f"prompt tokens={input_ids.shape[1]} max_new_tokens={args.max_new_tokens} draft_len={draft_len}", flush=True)
-    print(f"raw prompt text: {raw_prompt!r}", flush=True)
-    print(f"rendered prompt text: {prompt!r}", flush=True)
+    if args.dataset_path is not None:
+        print(
+            "dataset sample: "
+            f"path={args.dataset_path} index={args.dataset_index} seed={args.window_seed} "
+            f"row={source_metadata['sampled_row_idx']} t={source_metadata['sampled_t']}",
+            flush=True,
+        )
+        print(f"teacher future ids: {source_metadata['teacher_future_ids'][:args.max_new_tokens]}", flush=True)
+        print(f"teacher future text: {source_metadata['teacher_future_text']!r}", flush=True)
+    else:
+        print(f"raw prompt text: {source_metadata['raw_prompt']!r}", flush=True)
+        print(f"rendered prompt text: {source_metadata['rendered_prompt']!r}", flush=True)
 
     backbone = trace_backbone(frozen_lm, input_ids, max_new_tokens=args.max_new_tokens)
     drafter_only = trace_drafter_only(
@@ -424,8 +529,7 @@ def main() -> None:
             "draft_len": draft_len,
             "decode_prompt_escapes": args.decode_prompt_escapes,
             "chat_template": args.chat_template,
-            "raw_prompt": raw_prompt,
-            "rendered_prompt": prompt,
+            **source_metadata,
         },
         "config": config,
         "summary": summary,

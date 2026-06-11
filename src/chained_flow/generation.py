@@ -50,6 +50,7 @@ def generate_with_drafter(
     max_new_tokens: int,
     draft_len: int,
     eos_token_id: int | None = None,
+    force_zero_accept: bool = False,
 ) -> GenerationResult:
     frozen_lm = context.frozen_lm
     timings = TimingStats()
@@ -80,7 +81,11 @@ def generate_with_drafter(
 
             proposal = drafter.propose(state, min(draft_len, remaining_after_anchor))
             timings.merge(proposal.timings, "drafter")
-            verify_result = verifier.verify(state, proposal.tokens)
+            verify_result = verifier.verify(
+                state,
+                proposal.tokens,
+                max_accept_len=0 if force_zero_accept else None,
+            )
             timings.merge(verify_result.timings, "verifier")
             state = verify_result.state
 

@@ -49,6 +49,7 @@ class ChunkedFlowEvalArguments:
     checkpoint_stride: int = 1
     noise_seed: int = 0
     measure_speedup: bool = False
+    measure_speedup_lower_bound: bool = False
     speedup_num_prompts: int = 16
     speedup_warmup_prompts: int = 2
     speedup_max_new_tokens: int = 32
@@ -388,6 +389,48 @@ def generate_greedy_baseline(frozen_lm, prompt: torch.Tensor, *, max_new_tokens:
     }
 
 
+def _accumulate_flow_speed(
+    flow,
+    *,
+    totals: dict[str, float],
+) -> None:
+    flow_time = flow.timings.get("total_generation")
+    flow_prefill_time = flow.timings.get("prefill")
+    totals["seconds"] += flow_time
+    totals["decode_seconds"] += max(0.0, flow_time - flow_prefill_time)
+    totals["tokens"] += float(flow.generated_token_count)
+    for step in flow.step_stats:
+        totals["accepted"] += float(step.accepted_len)
+        totals["drafted"] += float(step.draft_len)
+        totals["steps"] += 1.0
+
+
+def _flow_speed_summary(
+    *,
+    prefix: str,
+    totals: dict[str, float],
+    baseline_tps: float,
+    baseline_decode_tps: float,
+) -> dict[str, float | int]:
+    flow_tps = totals["tokens"] / totals["seconds"] if totals["seconds"] > 0 else 0.0
+    flow_decode_tps = totals["tokens"] / totals["decode_seconds"] if totals["decode_seconds"] > 0 else 0.0
+    mean_accept = totals["accepted"] / totals["steps"] if totals["steps"] > 0 else 0.0
+    mean_draft = totals["drafted"] / totals["steps"] if totals["steps"] > 0 else 0.0
+    return {
+        f"{prefix}real": flow_tps / baseline_tps if baseline_tps > 0 else 0.0,
+        f"{prefix}decode_only": flow_decode_tps / baseline_decode_tps if baseline_decode_tps > 0 else 0.0,
+        f"{prefix}acceptance_proxy": 1.0 + mean_accept,
+        f"{prefix}flow_tokens_per_second": flow_tps,
+        f"{prefix}flow_decode_tokens_per_second": flow_decode_tps,
+        f"{prefix}flow_seconds": totals["seconds"],
+        f"{prefix}flow_decode_seconds": totals["decode_seconds"],
+        f"{prefix}flow_generated_tokens": int(totals["tokens"]),
+        f"{prefix}mean_accept_len": mean_accept,
+        f"{prefix}mean_draft_len": mean_draft,
+        f"{prefix}draft_steps": int(totals["steps"]),
+    }
+
+
 @torch.inference_mode()
 def measure_generation_speedup(
     args: ChunkedFlowEvalArguments,
@@ -422,16 +465,21 @@ def measure_generation_speedup(
             max_new_tokens=args.speedup_max_new_tokens,
             draft_len=draft_len,
         )
+        if args.measure_speedup_lower_bound:
+            generate_with_drafter(
+                ChainedFlowContext(frozen_lm),
+                module.drafter,
+                prompt,
+                max_new_tokens=args.speedup_max_new_tokens,
+                draft_len=draft_len,
+                force_zero_accept=True,
+            )
 
     baseline_seconds = 0.0
     baseline_decode_seconds = 0.0
     baseline_tokens = 0.0
-    flow_seconds = 0.0
-    flow_decode_seconds = 0.0
-    flow_tokens = 0.0
-    accepted_total = 0.0
-    drafted_total = 0.0
-    step_count = 0
+    flow_totals = {"seconds": 0.0, "decode_seconds": 0.0, "tokens": 0.0, "accepted": 0.0, "drafted": 0.0, "steps": 0.0}
+    lower_bound_totals = {"seconds": 0.0, "decode_seconds": 0.0, "tokens": 0.0, "accepted": 0.0, "drafted": 0.0, "steps": 0.0}
     iterator = prompts
     if tqdm is not None:
         iterator = tqdm(prompts, total=len(prompts), desc="measuring speedup", unit="prompt")
@@ -448,43 +496,42 @@ def measure_generation_speedup(
             max_new_tokens=args.speedup_max_new_tokens,
             draft_len=draft_len,
         )
-        flow_time = flow.timings.get("total_generation")
-        flow_prefill_time = flow.timings.get("prefill")
-        flow_seconds += flow_time
-        flow_decode_seconds += max(0.0, flow_time - flow_prefill_time)
-        flow_tokens += float(flow.generated_token_count)
-        for step in flow.step_stats:
-            accepted_total += float(step.accepted_len)
-            drafted_total += float(step.draft_len)
-            step_count += 1
+        _accumulate_flow_speed(flow, totals=flow_totals)
+
+        if args.measure_speedup_lower_bound:
+            lower_bound_flow = generate_with_drafter(
+                ChainedFlowContext(frozen_lm),
+                module.drafter,
+                prompt,
+                max_new_tokens=args.speedup_max_new_tokens,
+                draft_len=draft_len,
+                force_zero_accept=True,
+            )
+            _accumulate_flow_speed(lower_bound_flow, totals=lower_bound_totals)
 
     baseline_tps = baseline_tokens / baseline_seconds if baseline_seconds > 0 else 0.0
-    flow_tps = flow_tokens / flow_seconds if flow_seconds > 0 else 0.0
     baseline_decode_tps = baseline_tokens / baseline_decode_seconds if baseline_decode_seconds > 0 else 0.0
-    flow_decode_tps = flow_tokens / flow_decode_seconds if flow_decode_seconds > 0 else 0.0
-    mean_accept = accepted_total / step_count if step_count > 0 else 0.0
-    mean_draft = drafted_total / step_count if step_count > 0 else 0.0
-    return {
-        "real": flow_tps / baseline_tps if baseline_tps > 0 else 0.0,
-        "decode_only": flow_decode_tps / baseline_decode_tps if baseline_decode_tps > 0 else 0.0,
-        "acceptance_proxy": 1.0 + mean_accept,
+    summary = {
         "baseline_tokens_per_second": baseline_tps,
-        "flow_tokens_per_second": flow_tps,
         "baseline_decode_tokens_per_second": baseline_decode_tps,
-        "flow_decode_tokens_per_second": flow_decode_tps,
         "baseline_seconds": baseline_seconds,
-        "flow_seconds": flow_seconds,
         "baseline_decode_seconds": baseline_decode_seconds,
-        "flow_decode_seconds": flow_decode_seconds,
         "baseline_generated_tokens": int(baseline_tokens),
-        "flow_generated_tokens": int(flow_tokens),
         "num_prompts": len(prompts),
         "warmup_prompts": len(warmup_prompts),
         "max_new_tokens": args.speedup_max_new_tokens,
-        "mean_accept_len": mean_accept,
-        "mean_draft_len": mean_draft,
-        "draft_steps": step_count,
     }
+    summary.update(_flow_speed_summary(prefix="", totals=flow_totals, baseline_tps=baseline_tps, baseline_decode_tps=baseline_decode_tps))
+    if args.measure_speedup_lower_bound:
+        summary.update(
+            _flow_speed_summary(
+                prefix="lower_bound_",
+                totals=lower_bound_totals,
+                baseline_tps=baseline_tps,
+                baseline_decode_tps=baseline_decode_tps,
+            )
+        )
+    return summary
 
 
 @torch.inference_mode()

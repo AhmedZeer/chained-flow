@@ -21,6 +21,7 @@ class SingleExpertFlowConfig:
     ffn_multiplier: int = 4
     num_flow_steps: int = 1
     noise_scale: float = 1.0
+    train_vae: bool = False
 
     def __post_init__(self) -> None:
         if self.draft_length < 1:
@@ -114,7 +115,9 @@ class SingleExpertFlowDrafter(nn.Module):
         self.config = config
         from chained_flow.vae import load_hidden_vae_from_dir
 
-        self.vae = load_hidden_vae_from_dir(config.vae_dir, device=frozen_lm.device, freeze=True)
+        self.vae = load_hidden_vae_from_dir(config.vae_dir, device=frozen_lm.device, freeze=not config.train_vae)
+        self.include_vae_in_state_dict = config.train_vae
+        self._cached_vae_dtype = next(self.vae.parameters()).dtype
         self.hidden_size = frozen_lm.model.config.hidden_size
         self.latent_size = self.vae.config.latent_size
         self.expert = CrossAttentionFlowExpert(
@@ -124,9 +127,12 @@ class SingleExpertFlowDrafter(nn.Module):
             num_heads=config.num_heads,
             ffn_multiplier=config.ffn_multiplier,
         )
+        self._cached_expert_dtype = next(self.expert.parameters()).dtype
 
     def state_dict(self, *args, **kwargs):
         state = super().state_dict(*args, **kwargs)
+        if self.include_vae_in_state_dict:
+            return state
         return {key: value for key, value in state.items() if not key.startswith("vae.")}
 
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
@@ -143,21 +149,24 @@ class SingleExpertFlowDrafter(nn.Module):
         return torch.cat([pad, hidden], dim=1)
 
     def _vae_dtype(self) -> torch.dtype:
-        return next(self.vae.parameters()).dtype
+        return self._cached_vae_dtype
 
     def _expert_dtype(self) -> torch.dtype:
-        return next(self.expert.parameters()).dtype
+        return self._cached_expert_dtype
 
     def encode_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
         original_shape = hidden.shape[:-1]
-        flat_hidden = hidden.reshape(-1, hidden.shape[-1]).to(device=self.frozen_lm.device, dtype=self._vae_dtype())
-        with torch.no_grad():
+        flat_hidden = hidden.reshape(-1, hidden.shape[-1]).to(device=hidden.device, dtype=self._vae_dtype())
+        if self.config.train_vae:
             latent = self.vae.encode(flat_hidden).mu
+        else:
+            with torch.no_grad():
+                latent = self.vae.encode(flat_hidden).mu
         return latent.reshape(*original_shape, -1)
 
     def decode_latent(self, latent: torch.Tensor) -> torch.Tensor:
         original_shape = latent.shape[:-1]
-        flat_latent = latent.reshape(-1, latent.shape[-1]).to(device=self.frozen_lm.device, dtype=self._vae_dtype())
+        flat_latent = latent.reshape(-1, latent.shape[-1]).to(device=latent.device, dtype=self._vae_dtype())
         decoded = self.vae.decode(flat_latent)
         return decoded.reshape(*original_shape, -1)
 
@@ -170,7 +179,7 @@ class SingleExpertFlowDrafter(nn.Module):
     ) -> torch.Tensor:
         if context_latents.ndim != 3:
             raise ValueError("context_latents must have shape [B, m, Z]")
-        context_latents = context_latents.to(device=self.frozen_lm.device, dtype=self._expert_dtype())
+        context_latents = context_latents.to(device=context_latents.device, dtype=self._expert_dtype())
         batch = context_latents.shape[0]
         steps = self.config.num_flow_steps if num_steps is None else num_steps
         if steps < 1:

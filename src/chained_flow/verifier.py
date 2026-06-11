@@ -26,6 +26,8 @@ class SpeculativeVerifier:
         self,
         state: LMState,
         draft_tokens: torch.Tensor,
+        *,
+        max_accept_len: int | None = None,
     ) -> VerifyResult:
         timings = TimingStats()
         device = self.frozen_lm.device
@@ -56,6 +58,16 @@ class SpeculativeVerifier:
                 dim=1,
             )
             acceptance = greedy_acceptance(draft_tokens, verifier_tokens)
+            if max_accept_len is not None and acceptance.accepted_len > max_accept_len:
+                if max_accept_len < 0:
+                    raise ValueError("max_accept_len must be non-negative")
+                accepted_len = min(max_accept_len, draft_tokens.shape[1])
+                acceptance = AcceptanceResult(
+                    accepted_len=accepted_len,
+                    accepted_tokens=draft_tokens[:, :accepted_len],
+                    next_token=verifier_tokens[:, accepted_len : accepted_len + 1],
+                    matches=acceptance.matches,
+                )
 
         with timed_section(timings, "cache_repair", device):
             committed_count = acceptance.accepted_len
